@@ -195,6 +195,24 @@ router.post('/', auth, async (req, res) => {
     ])
     
     logger.success(`Pedido creado: ID ${rows[0].id}`)
+    
+    // Emitir evento WebSocket al emprendedor
+    const io = req.app.get('io')
+    if (io) {
+      const { rows: empRows } = await pool.query(
+        'SELECT usuario_id FROM emprendimientos WHERE id = $1',
+        [emprendimiento_id]
+      )
+      if (empRows.length > 0) {
+        const emprendedorId = empRows[0].usuario_id
+        io.emit(`pedido:nuevo:${emprendedorId}`, {
+          pedido: rows[0],
+          tipo: 'nuevo_pedido'
+        })
+        logger.info(`📡 Evento WebSocket emitido: pedido:nuevo:${emprendedorId}`)
+      }
+    }
+    
     res.status(201).json({
       ok: true,
       mensaje: 'Pedido creado exitosamente',
@@ -255,6 +273,20 @@ router.patch('/:id/confirmar', auth, async (req, res) => {
     )
     
     logger.success(`Pedido ${id} confirmado`)
+    
+    // Emitir evento WebSocket al cliente
+    const io = req.app.get('io')
+    if (io && rows.length > 0) {
+      const pedido = rows[0]
+      io.emit(`pedido:estado:${pedido.usuario_id}`, {
+        pedidoId: id,
+        estado: 'confirmado',
+        pedido: pedido,
+        tipo: 'pedido_confirmado'
+      })
+      logger.info(`📡 Evento WebSocket emitido: pedido:estado:${pedido.usuario_id}`)
+    }
+    
     res.json({
       ok: true,
       mensaje: 'Pedido confirmado exitosamente',
@@ -334,6 +366,20 @@ router.patch('/:id/estado', auth, async (req, res) => {
     )
     
     logger.success(`Estado del pedido ${id} actualizado a ${estado}`)
+    
+    // Emitir evento WebSocket al cliente
+    const io = req.app.get('io')
+    if (io && rows.length > 0) {
+      const pedido = rows[0]
+      io.emit(`pedido:estado:${pedido.usuario_id}`, {
+        pedidoId: id,
+        estado: estado,
+        pedido: pedido,
+        tipo: 'cambio_estado'
+      })
+      logger.info(`📡 Evento WebSocket emitido: pedido:estado:${pedido.usuario_id}`)
+    }
+    
     res.json({
       ok: true,
       mensaje: 'Estado actualizado exitosamente',
@@ -380,6 +426,47 @@ router.patch('/:id/confirmar-rechazo', auth, async (req, res) => {
     })
   } catch (err) {
     logger.error('Error confirmando rechazo:', err.message)
+    res.status(500).json({ ok: false, error: 'Error interno' })
+  }
+})
+
+// PATCH /api/pedidos/:id/confirmar-cancelacion - Confirmar que el emprendedor aceptó la cancelación
+router.patch('/:id/confirmar-cancelacion', auth, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { id: userId } = req.auth
+    
+    logger.info(`Confirmando cancelación del pedido ${id} por emprendedor ${userId}`)
+    
+    // Verificar que el pedido existe y pertenece a uno de los emprendimientos del usuario
+    const { rows: pedidoRows } = await pool.query(
+      `SELECT tc.* FROM transaccion_comercial tc
+       LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
+       WHERE tc.id = $1 AND e.usuario_id = $2 AND tc.estado = $3`,
+      [id, userId, 'cancelado']
+    )
+    
+    if (!pedidoRows.length) {
+      return res.status(404).json({ ok: false, error: 'Pedido cancelado no encontrado' })
+    }
+    
+    // Marcar cancelación como confirmada
+    const { rows } = await pool.query(
+      `UPDATE transaccion_comercial 
+       SET cancelacion_confirmada = true, updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id]
+    )
+    
+    logger.success(`Cancelación del pedido ${id} confirmada por emprendedor`)
+    res.json({
+      ok: true,
+      mensaje: 'Cancelación confirmada exitosamente',
+      pedido: rows[0]
+    })
+  } catch (err) {
+    logger.error('Error confirmando cancelación:', err.message)
     res.status(500).json({ ok: false, error: 'Error interno' })
   }
 })
