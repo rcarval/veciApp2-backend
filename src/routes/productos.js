@@ -68,7 +68,7 @@ router.get('/emprendimientos/:emprendimientoId/mis-productos', auth, async (req,
       `SELECT id, nombre, descripcion, precio, categoria, imagen_url, 
               oferta, precio_oferta, precio_a_cotizar, activo, fecha_creacion, fecha_actualizacion
        FROM productos 
-       WHERE emprendimiento_id = $1 
+       WHERE emprendimiento_id = $1 AND activo = true
        ORDER BY fecha_creacion DESC`,
       [emprendimientoId]
     )

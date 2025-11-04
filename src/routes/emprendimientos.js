@@ -144,7 +144,7 @@ router.get('/mis-emprendimientos', auth, async (req, res) => {
               es_borrador, emprendimiento_original_id,
               fecha_creacion, fecha_actualizacion
        FROM emprendimientos 
-       WHERE usuario_id = $1 
+       WHERE usuario_id = $1 AND estado != 'inactivo'
        ORDER BY CASE 
          WHEN es_borrador = true THEN 0 
          ELSE 1 
