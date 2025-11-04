@@ -477,13 +477,13 @@ router.put('/emprendimientos/:emprendimientoId/productos/:productoId', auth, upl
   }
 })
 
-// DELETE /api/emprendimientos/:id/productos/:productoId - Eliminar producto
+// DELETE /api/emprendimientos/:id/productos/:productoId - Desactivar producto (soft delete)
 router.delete('/emprendimientos/:emprendimientoId/productos/:productoId', auth, async (req, res) => {
   try {
     const { emprendimientoId, productoId } = req.params
     const { id: userId } = req.auth
     
-    logger.info(`Eliminando producto ${productoId} del emprendimiento ${emprendimientoId}`)
+    logger.info(`Desactivando producto ${productoId} del emprendimiento ${emprendimientoId}`)
     
     // Verificar ownership del emprendimiento
     const { rows: empRows } = await pool.query(
@@ -496,9 +496,9 @@ router.delete('/emprendimientos/:emprendimientoId/productos/:productoId', auth, 
       return res.status(404).json({ ok: false, error: 'Emprendimiento no encontrado' })
     }
     
-    // Obtener imagen para eliminarla
+    // Verificar que el producto existe
     const { rows: prodRows } = await pool.query(
-      'SELECT imagen_url FROM productos WHERE id = $1 AND emprendimiento_id = $2',
+      'SELECT id FROM productos WHERE id = $1 AND emprendimiento_id = $2',
       [productoId, emprendimientoId]
     )
     
@@ -507,31 +507,18 @@ router.delete('/emprendimientos/:emprendimientoId/productos/:productoId', auth, 
       return res.status(404).json({ ok: false, error: 'Producto no encontrado' })
     }
     
-    // Eliminar el producto
+    // Desactivar el producto (soft delete)
     await pool.query(
-      'DELETE FROM productos WHERE id = $1 AND emprendimiento_id = $2',
+      'UPDATE productos SET activo = false, fecha_actualizacion = NOW() WHERE id = $1 AND emprendimiento_id = $2',
       [productoId, emprendimientoId]
     )
     
-    // Eliminar imagen si existe
-    const imagenUrl = prodRows[0].imagen_url
-    if (imagenUrl && imagenUrl.includes('/uploads/productos/')) {
-      const filename = imagenUrl.split('/').pop()
-      const filePath = path.join(productosDir, filename)
-      try {
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath)
-          logger.success(`Imagen eliminada: ${filename}`)
-        }
-      } catch (err) {
-        logger.error(`Error eliminando imagen: ${err.message}`)
-      }
-    }
+    // NO eliminar la imagen - mantener para posible reactivación futura
     
-    logger.success(`Producto ${productoId} eliminado correctamente`)
+    logger.success(`Producto ${productoId} desactivado correctamente (soft delete)`)
     res.json({ ok: true, mensaje: 'Producto eliminado correctamente' })
   } catch (err) {
-    logger.error('Error eliminando producto:', err.message)
+    logger.error('Error desactivando producto:', err.message)
     res.status(500).json({ ok: false, error: 'Error interno' })
   }
 })

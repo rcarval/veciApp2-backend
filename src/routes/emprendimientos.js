@@ -734,10 +734,10 @@ router.delete('/:id', auth, async (req, res) => {
   try {
     const { id } = req.params
     const { id: userId } = req.auth
-    logger.info(`Eliminando emprendimiento ${id}`)
+    logger.info(`Procesando eliminación de emprendimiento ${id}`)
     
     const { rows: ownRows } = await pool.query(
-      'SELECT 1 FROM emprendimientos WHERE id = $1 AND usuario_id = $2',
+      'SELECT es_borrador FROM emprendimientos WHERE id = $1 AND usuario_id = $2',
       [id, userId]
     )
     
@@ -746,12 +746,44 @@ router.delete('/:id', auth, async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Emprendimiento no encontrado' })
     }
     
-    await pool.query('DELETE FROM emprendimientos WHERE id = $1 AND usuario_id = $2', [id, userId])
+    const esBorrador = ownRows[0].es_borrador
     
-    logger.success(`Emprendimiento ${id} eliminado correctamente`)
-    res.json({ ok: true, mensaje: 'Emprendimiento eliminado correctamente' })
+    if (esBorrador) {
+      // Si es borrador, eliminar físicamente (hard delete)
+      logger.info(`Eliminando borrador ${id} físicamente`)
+      await pool.query(
+        'DELETE FROM emprendimientos WHERE id = $1 AND usuario_id = $2',
+        [id, userId]
+      )
+      logger.success(`Borrador ${id} eliminado físicamente`)
+      res.json({ ok: true, mensaje: 'Borrador eliminado correctamente' })
+    } else {
+      // Si no es borrador, desactivar (soft delete)
+      logger.info(`Desactivando emprendimiento ${id} y sus productos`)
+      
+      // Desactivar emprendimiento
+      await pool.query(
+        `UPDATE emprendimientos 
+         SET estado = 'inactivo', fecha_actualizacion = NOW() 
+         WHERE id = $1 AND usuario_id = $2`,
+        [id, userId]
+      )
+      
+      // Desactivar todos los productos asociados
+      const { rowCount } = await pool.query(
+        'UPDATE productos SET activo = false, fecha_actualizacion = NOW() WHERE emprendimiento_id = $1',
+        [id]
+      )
+      
+      logger.success(`Emprendimiento ${id} y ${rowCount} productos desactivados correctamente (soft delete)`)
+      res.json({ 
+        ok: true, 
+        mensaje: 'Emprendimiento eliminado correctamente',
+        productos_desactivados: rowCount
+      })
+    }
   } catch (err) {
-    logger.error('Error eliminando emprendimiento:', err.message)
+    logger.error('Error procesando eliminación de emprendimiento:', err.message)
     res.status(500).json({ ok: false, error: 'Error interno' })
   }
 })
