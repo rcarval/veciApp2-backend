@@ -1,0 +1,21 @@
+========================================
+AGREGAR ESTAS LÍNEAS A TU ARCHIVO .env
+========================================
+
+# Configuración de Twilio para SMS de Verificación
+TWILIO_ACCOUNT_SID=tu_account_sid_aqui
+TWILIO_AUTH_TOKEN=tu_auth_token_aqui
+TWILIO_VERIFY_SERVICE_SID=tu_verify_service_sid_aqui
+
+========================================
+
+INSTRUCCIONES:
+
+1. Abre el archivo: veciApp2-backend/.env
+2. Agrega las 3 líneas de arriba al final del archivo
+3. Guarda el archivo
+4. Reinicia el servidor backend (npm start)
+
+========================================
+
+

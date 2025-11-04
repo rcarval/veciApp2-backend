@@ -66,7 +66,7 @@ router.get('/emprendimientos/:emprendimientoId/mis-productos', auth, async (req,
     
     const { rows } = await pool.query(
       `SELECT id, nombre, descripcion, precio, categoria, imagen_url, 
-              oferta, precio_oferta, activo, fecha_creacion, fecha_actualizacion
+              oferta, precio_oferta, precio_a_cotizar, activo, fecha_creacion, fecha_actualizacion
        FROM productos 
        WHERE emprendimiento_id = $1 
        ORDER BY fecha_creacion DESC`,
@@ -146,6 +146,45 @@ const calcularEstadoHorarios = (horarios) => {
   return { estado: 'cerrado', horaCierre: null }
 }
 
+// GET /api/ofertas - Listar todos los productos en oferta de emprendimientos activos
+router.get('/ofertas', async (req, res) => {
+  try {
+    logger.info('Listando productos en oferta')
+    
+    const { rows } = await pool.query(
+      `SELECT p.id, p.emprendimiento_id, p.nombre, p.descripcion, p.precio, 
+              p.categoria, p.imagen_url, p.oferta, p.precio_oferta, p.activo,
+              p.fecha_creacion, p.fecha_actualizacion,
+              e.nombre as emprendimiento_nombre, e.logo_url as emprendimiento_logo,
+              e.background_url as emprendimiento_background, e.descripcion_corta as emprendimiento_descripcion,
+              e.direccion as emprendimiento_direccion, e.telefono as emprendimiento_telefono,
+              e.categoria_principal, e.horarios, e.medios_pago, e.tipos_entrega
+       FROM productos p
+       LEFT JOIN emprendimientos e ON p.emprendimiento_id = e.id
+       WHERE p.activo = true 
+         AND p.oferta = true
+         AND e.estado = 'activo'
+       ORDER BY p.fecha_creacion DESC`
+    )
+    
+    // Agregar estado calculado a productos (basado en su emprendimiento)
+    const productosConEstado = rows.map(prod => {
+      const estadoHorarios = calcularEstadoHorarios(prod.horarios)
+      return {
+        ...prod,
+        estado_calculado: estadoHorarios.estado,
+        hora_cierre: estadoHorarios.horaCierre
+      }
+    })
+    
+    logger.success(`Productos en oferta obtenidos: ${productosConEstado.length}`)
+    res.json({ ok: true, productos: productosConEstado })
+  } catch (err) {
+    logger.error('Error listando productos en oferta:', err.message)
+    res.status(500).json({ ok: false, error: 'Error interno al listar ofertas' })
+  }
+})
+
 router.get('/emprendimientos/:emprendimientoId/productos', async (req, res) => {
   try {
     const { emprendimientoId } = req.params
@@ -165,18 +204,10 @@ router.get('/emprendimientos/:emprendimientoId/productos', async (req, res) => {
     
     const emprendimiento = empRows[0]
     
-    // Verificar si está abierto según horarios
-    const estadoHorarios = calcularEstadoHorarios(emprendimiento.horarios)
-    
-    // Si está cerrado, no devolver productos
-    if (estadoHorarios.estado === 'cerrado') {
-      logger.info(`Emprendimiento ${emprendimientoId} está cerrado, no se devuelven productos`)
-      return res.json({ ok: true, productos: [] })
-    }
-    
+    // Obtener productos siempre (para permitir modo preview cuando está cerrado)
     const { rows } = await pool.query(
       `SELECT id, nombre, descripcion, precio, categoria, imagen_url, 
-              oferta, precio_oferta, activo, fecha_creacion, fecha_actualizacion
+              oferta, precio_oferta, precio_a_cotizar, activo, fecha_creacion, fecha_actualizacion
        FROM productos 
        WHERE emprendimiento_id = $1 AND activo = true
        ORDER BY categoria, fecha_creacion DESC`,
@@ -246,9 +277,12 @@ router.post('/emprendimientos/:emprendimientoId/productos', auth, uploadProducto
       return res.status(400).json({ ok: false, error: 'Faltan campos obligatorios (nombre, descripcion, precio)' })
     }
     
-    // Verificar que el emprendimiento pertenece al usuario
+    // Verificar que el emprendimiento pertenece al usuario Y obtener info del plan
     const { rows: empRows } = await pool.query(
-      'SELECT 1 FROM emprendimientos WHERE id = $1 AND usuario_id = $2',
+      `SELECT e.id, u.plan_id, u.vigencia_hasta
+       FROM emprendimientos e
+       INNER JOIN usuarios u ON e.usuario_id = u.id
+       WHERE e.id = $1 AND e.usuario_id = $2`,
       [emprendimientoId, userId]
     )
     
@@ -256,6 +290,30 @@ router.post('/emprendimientos/:emprendimientoId/productos', auth, uploadProducto
       if (req.file && req.file.path) fs.unlinkSync(req.file.path)
       logger.warn(`Emprendimiento ${emprendimientoId} no encontrado o no pertenece al usuario`)
       return res.status(404).json({ ok: false, error: 'Emprendimiento no encontrado' })
+    }
+    
+    // Verificar límite de productos según plan
+    const emprendimiento = empRows[0]
+    const tienePlanPremium = emprendimiento.plan_id == 2
+    const vigenciaActiva = emprendimiento.vigencia_hasta && new Date(emprendimiento.vigencia_hasta) > new Date()
+    const esPremium = tienePlanPremium && vigenciaActiva
+    const limiteProductos = esPremium ? 30 : 0 // Plan básico no permite productos
+    
+    // Contar productos actuales del emprendimiento
+    const { rows: countRows } = await pool.query(
+      'SELECT COUNT(*) as total FROM productos WHERE emprendimiento_id = $1',
+      [emprendimientoId]
+    )
+    
+    const productosActuales = parseInt(countRows[0].total)
+    
+    if (productosActuales >= limiteProductos) {
+      if (req.file && req.file.path) fs.unlinkSync(req.file.path)
+      const mensaje = esPremium 
+        ? `Has alcanzado el límite de ${limiteProductos} productos para este emprendimiento`
+        : 'La función de productos solo está disponible en el plan Premium'
+      logger.warn(`Límite de productos alcanzado para emprendimiento ${emprendimientoId}: ${productosActuales}/${limiteProductos}`)
+      return res.status(400).json({ ok: false, error: mensaje })
     }
     
     // Construir URL de la imagen si existe
@@ -268,20 +326,23 @@ router.post('/emprendimientos/:emprendimientoId/productos', auth, uploadProducto
     const categoriasValidas = ['principal', 'oferta', 'secundario']
     const categoriaValida = categoriasValidas.includes(categoria) ? categoria : 'principal'
     
+    // Parsear precio_a_cotizar del body
+    const precioACotizarBool = req.body.precio_a_cotizar === 'true' || req.body.precio_a_cotizar === true
+    
     // Insertar producto
     const insert = `
       INSERT INTO productos 
       (emprendimiento_id, nombre, descripcion, precio, categoria, 
-       imagen_url, oferta, precio_oferta, activo)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+       imagen_url, oferta, precio_oferta, precio_a_cotizar, activo)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
       RETURNING id, nombre, descripcion, precio, categoria, imagen_url, 
-                oferta, precio_oferta, activo, fecha_creacion, fecha_actualizacion
+                oferta, precio_oferta, precio_a_cotizar, activo, fecha_creacion, fecha_actualizacion
     `
     
     const ofertaBool = oferta === 'true' || oferta === true
     const { rows } = await pool.query(insert, [
       emprendimientoId, nombre, descripcion, precio, categoriaValida,
-      imagenUrl, ofertaBool, precio_oferta || null
+      imagenUrl, ofertaBool, precio_oferta || null, precioACotizarBool
     ])
     
     logger.success(`Producto creado: ID ${rows[0].id}`)
@@ -367,19 +428,21 @@ router.put('/emprendimientos/:emprendimientoId/productos/:productoId', auth, upl
         imagen_url = COALESCE($7, imagen_url),
         oferta = COALESCE($8, oferta),
         precio_oferta = COALESCE($9, precio_oferta),
-        activo = COALESCE($10, activo),
+        precio_a_cotizar = COALESCE($10, precio_a_cotizar),
+        activo = COALESCE($11, activo),
         fecha_actualizacion = NOW()
       WHERE id = $1 AND emprendimiento_id = $2
       RETURNING id, nombre, descripcion, precio, categoria, imagen_url, 
-                oferta, precio_oferta, activo, fecha_creacion, fecha_actualizacion
+                oferta, precio_oferta, precio_a_cotizar, activo, fecha_creacion, fecha_actualizacion
     `
     
     const ofertaBool = oferta === 'true' || oferta === true
+    const precioACotizarBool = req.body.precio_a_cotizar !== undefined ? (req.body.precio_a_cotizar === 'true' || req.body.precio_a_cotizar === true) : undefined
     const activoBool = activo !== undefined ? (activo === 'true' || activo === true) : undefined
     
     const { rows } = await pool.query(update, [
       productoId, emprendimientoId, nombre || null, descripcion || null, precio || null,
-      categoriaValida || null, newImagenUrl || null, ofertaBool, precio_oferta || null, activoBool
+      categoriaValida || null, newImagenUrl || null, ofertaBool, precio_oferta || null, precioACotizarBool, activoBool
     ])
     
     // Eliminar imagen anterior si se subió nueva
