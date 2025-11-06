@@ -3,6 +3,7 @@ const router = express.Router()
 const { pool } = require('../db/pool')
 const auth = require('../middleware/auth')
 const logger = require('../utils/logger')
+const notificationService = require('../services/notificationService')
 
 // GET /api/pedidos - Obtener mis pedidos (cliente)
 router.get('/', auth, async (req, res) => {
@@ -31,27 +32,53 @@ router.get('/', auth, async (req, res) => {
   }
 })
 
-// GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor)
+// GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor)
 router.get('/recibidos', auth, async (req, res) => {
   try {
-    const { id: userId } = req.auth
-    logger.info(`Listando pedidos recibidos para usuario ${userId}`)
+    const { id: userId, tipo_usuario } = req.auth
+    logger.info(`Listando pedidos recibidos para usuario ${userId}, tipo: ${tipo_usuario}`)
     
-    // Obtener todos los emprendimientos del usuario
-    const { rows: empRows } = await pool.query(
-      'SELECT id, nombre as emprendimiento_nombre, logo_url as emprendimiento_logo FROM emprendimientos WHERE usuario_id = $1',
-      [userId]
-    )
+    let emprendimientoIds = []
+    let empDict = {}
     
-    if (!empRows.length) {
-      return res.json({ ok: true, pedidos: [] })
+    if (tipo_usuario === 'vendedor') {
+      // Vendedor: obtener emprendimiento asignado
+      const { rows: userRows } = await pool.query(
+        'SELECT emprendimiento_asignado_id FROM usuarios WHERE id = $1',
+        [userId]
+      )
+      
+      if (!userRows.length || !userRows[0].emprendimiento_asignado_id) {
+        return res.json({ ok: true, pedidos: [] })
+      }
+      
+      const { rows: empRows } = await pool.query(
+        'SELECT id, nombre as emprendimiento_nombre, logo_url as emprendimiento_logo FROM emprendimientos WHERE id = $1',
+        [userRows[0].emprendimiento_asignado_id]
+      )
+      
+      if (!empRows.length) {
+        return res.json({ ok: true, pedidos: [] })
+      }
+      
+      emprendimientoIds = [empRows[0].id]
+      empDict[empRows[0].id] = { nombre: empRows[0].emprendimiento_nombre, logo: empRows[0].emprendimiento_logo }
+    } else {
+      // Emprendedor: obtener todos sus emprendimientos
+      const { rows: empRows } = await pool.query(
+        'SELECT id, nombre as emprendimiento_nombre, logo_url as emprendimiento_logo FROM emprendimientos WHERE usuario_id = $1',
+        [userId]
+      )
+      
+      if (!empRows.length) {
+        return res.json({ ok: true, pedidos: [] })
+      }
+      
+      emprendimientoIds = empRows.map(emp => emp.id)
+      empRows.forEach(emp => {
+        empDict[emp.id] = { nombre: emp.emprendimiento_nombre, logo: emp.emprendimiento_logo }
+      })
     }
-    
-    const emprendimientoIds = empRows.map(emp => emp.id)
-    const empDict = {}
-    empRows.forEach(emp => {
-      empDict[emp.id] = { nombre: emp.emprendimiento_nombre, logo: emp.emprendimiento_logo }
-    })
     
     const { rows } = await pool.query(
       `SELECT tc.*, 
@@ -65,7 +92,7 @@ router.get('/recibidos', auth, async (req, res) => {
        LEFT JOIN usuarios u ON tc.usuario_id = u.id
        LEFT JOIN pedidos_historial_cliente phc ON phc.cliente_id = tc.usuario_id AND phc.emprendimiento_id = tc.emprendimiento_id
        WHERE tc.emprendimiento_id = ANY($1)
-       ORDER BY tc.created_at DESC`,
+       ORDER BY tc.created_at ASC`,
       [emprendimientoIds]
     )
     
@@ -196,21 +223,66 @@ router.post('/', auth, async (req, res) => {
     
     logger.success(`Pedido creado: ID ${rows[0].id}`)
     
+    // Obtener datos del emprendimiento y emprendedor
+    const { rows: empDataRows } = await pool.query(
+      'SELECT e.usuario_id, e.nombre, u.nombre as emprendedor_nombre FROM emprendimientos e LEFT JOIN usuarios u ON e.usuario_id = u.id WHERE e.id = $1',
+      [emprendimiento_id]
+    )
+    
+    let emprendedorId = null
+    let emprendimientoNombre = ''
+    
+    if (empDataRows.length > 0) {
+      emprendedorId = empDataRows[0].usuario_id
+      emprendimientoNombre = empDataRows[0].nombre
+    }
+    
+    // Obtener datos del cliente
+    const { rows: clienteRows } = await pool.query(
+      'SELECT nombre FROM usuarios WHERE id = $1',
+      [userId]
+    )
+    const clienteNombre = clienteRows[0]?.nombre || 'Un cliente'
+    
     // Emitir evento WebSocket al emprendedor
     const io = req.app.get('io')
-    if (io) {
-      const { rows: empRows } = await pool.query(
-        'SELECT usuario_id FROM emprendimientos WHERE id = $1',
-        [emprendimiento_id]
-      )
-      if (empRows.length > 0) {
-        const emprendedorId = empRows[0].usuario_id
-        io.emit(`pedido:nuevo:${emprendedorId}`, {
+    if (io && emprendedorId) {
+      io.emit(`pedido:nuevo:${emprendedorId}`, {
+        pedido: rows[0],
+        tipo: 'nuevo_pedido'
+      })
+      logger.info(`📡 Evento WebSocket emitido: pedido:nuevo:${emprendedorId}`)
+      
+      // Enviar notificación push al emprendedor
+      notificationService.notificarNuevoPedido(
+        emprendedorId,
+        rows[0],
+        { nombre: clienteNombre }
+      ).catch(err => logger.error('Error enviando notificación push:', err.message))
+    }
+    
+    // También emitir al vendedor asignado al emprendimiento (si existe)
+    const { rows: vendedorRows } = await pool.query(
+      'SELECT id, nombre FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
+      [emprendimiento_id, 'vendedor']
+    )
+    if (vendedorRows.length > 0) {
+      const vendedorId = vendedorRows[0].id
+      
+      if (io) {
+        io.emit(`pedido:nuevo:${vendedorId}`, {
           pedido: rows[0],
           tipo: 'nuevo_pedido'
         })
-        logger.info(`📡 Evento WebSocket emitido: pedido:nuevo:${emprendedorId}`)
+        logger.info(`📡 Evento WebSocket emitido: pedido:nuevo:${vendedorId}`)
       }
+      
+      // Enviar notificación push al vendedor
+      notificationService.notificarNuevoPedido(
+        vendedorId,
+        rows[0],
+        { nombre: clienteNombre }
+      ).catch(err => logger.error('Error enviando notificación push al vendedor:', err.message))
     }
     
     res.status(201).json({
@@ -234,12 +306,33 @@ router.patch('/:id/confirmar', auth, async (req, res) => {
     logger.info(`Confirmando pedido ${id}`)
     
     // Verificar que el pedido existe y pertenece a uno de los emprendimientos del usuario
-    const { rows: pedidoRows } = await pool.query(
-      `SELECT tc.* FROM transaccion_comercial tc
-       LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
-       WHERE tc.id = $1 AND e.usuario_id = $2`,
-      [id, userId]
-    )
+    const { tipo_usuario } = req.auth
+    let pedidoRows = []
+    
+    if (tipo_usuario === 'vendedor') {
+      // Vendedor: verificar que el pedido pertenece a su emprendimiento asignado
+      const { rows: userRows } = await pool.query(
+        'SELECT emprendimiento_asignado_id FROM usuarios WHERE id = $1',
+        [userId]
+      )
+      
+      if (userRows.length && userRows[0].emprendimiento_asignado_id) {
+        const { rows: vendedorRows } = await pool.query(
+          'SELECT tc.* FROM transaccion_comercial tc WHERE tc.id = $1 AND tc.emprendimiento_id = $2',
+          [id, userRows[0].emprendimiento_asignado_id]
+        )
+        pedidoRows = vendedorRows
+      }
+    } else {
+      // Emprendedor: verificar normalmente
+      const { rows: empRows } = await pool.query(
+        `SELECT tc.* FROM transaccion_comercial tc
+         LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
+         WHERE tc.id = $1 AND e.usuario_id = $2`,
+        [id, userId]
+      )
+      pedidoRows = empRows
+    }
     
     if (!pedidoRows.length) {
       return res.status(404).json({ ok: false, error: 'Pedido no encontrado' })
@@ -274,6 +367,15 @@ router.patch('/:id/confirmar', auth, async (req, res) => {
     
     logger.success(`Pedido ${id} confirmado`)
     
+    const pedidoConfirmado = rows[0]
+    
+    // Obtener datos del emprendimiento para la notificación
+    const { rows: empDataRows } = await pool.query(
+      'SELECT nombre FROM emprendimientos WHERE id = $1',
+      [pedidoConfirmado.emprendimiento_id]
+    )
+    const emprendimientoNombre = empDataRows[0]?.nombre || 'El emprendimiento'
+    
     // Emitir evento WebSocket al cliente
     const io = req.app.get('io')
     if (io && rows.length > 0) {
@@ -285,6 +387,50 @@ router.patch('/:id/confirmar', auth, async (req, res) => {
         tipo: 'pedido_confirmado'
       })
       logger.info(`📡 Evento WebSocket emitido: pedido:estado:${pedido.usuario_id}`)
+      
+      // Enviar notificación push al cliente
+      notificationService.notificarPedidoConfirmado(
+        pedido.usuario_id,
+        pedido,
+        { nombre: emprendimientoNombre }
+      ).catch(err => logger.error('Error enviando notificación push al cliente:', err.message))
+      
+      // También emitir al emprendedor y vendedor (si no es el que está confirmando)
+      const { rows: empRows } = await pool.query(
+        'SELECT usuario_id FROM emprendimientos WHERE id = $1',
+        [pedido.emprendimiento_id]
+      )
+      
+      if (empRows.length > 0) {
+        const emprendedorId = empRows[0].usuario_id
+        if (emprendedorId !== userId) {
+          io.emit(`pedido:estado:${emprendedorId}`, {
+            pedidoId: id,
+            estado: 'confirmado',
+            pedido: pedido,
+            tipo: 'pedido_confirmado'
+          })
+          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${emprendedorId}`)
+        }
+      }
+      
+      // Buscar y notificar al vendedor (si existe y no es el que está confirmando)
+      const { rows: vendedorRows } = await pool.query(
+        'SELECT id FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
+        [pedido.emprendimiento_id, 'vendedor']
+      )
+      if (vendedorRows.length > 0) {
+        const vendedorId = vendedorRows[0].id
+        if (vendedorId !== userId) {
+          io.emit(`pedido:estado:${vendedorId}`, {
+            pedidoId: id,
+            estado: 'confirmado',
+            pedido: pedido,
+            tipo: 'pedido_confirmado'
+          })
+          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${vendedorId}`)
+        }
+      }
     }
     
     res.json({
@@ -315,12 +461,33 @@ router.patch('/:id/estado', auth, async (req, res) => {
     }
     
     // Verificar que el pedido existe y pertenece a uno de los emprendimientos del usuario
-    const { rows: pedidoRows } = await pool.query(
-      `SELECT tc.* FROM transaccion_comercial tc
-       LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
-       WHERE tc.id = $1 AND e.usuario_id = $2`,
-      [id, userId]
-    )
+    const { tipo_usuario } = req.auth
+    let pedidoRows = []
+    
+    if (tipo_usuario === 'vendedor') {
+      // Vendedor: verificar que el pedido pertenece a su emprendimiento asignado
+      const { rows: userRows } = await pool.query(
+        'SELECT emprendimiento_asignado_id FROM usuarios WHERE id = $1',
+        [userId]
+      )
+      
+      if (userRows.length && userRows[0].emprendimiento_asignado_id) {
+        const { rows: vendedorRows } = await pool.query(
+          'SELECT tc.* FROM transaccion_comercial tc WHERE tc.id = $1 AND tc.emprendimiento_id = $2',
+          [id, userRows[0].emprendimiento_asignado_id]
+        )
+        pedidoRows = vendedorRows
+      }
+    } else {
+      // Emprendedor o cliente: verificar normalmente
+      const { rows: empRows } = await pool.query(
+        `SELECT tc.* FROM transaccion_comercial tc
+         LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
+         WHERE tc.id = $1 AND e.usuario_id = $2`,
+        [id, userId]
+      )
+      pedidoRows = empRows
+    }
     
     if (!pedidoRows.length) {
       // Verificar si es el cliente quien lo cancela
@@ -333,9 +500,9 @@ router.patch('/:id/estado', auth, async (req, res) => {
         return res.status(404).json({ ok: false, error: 'Pedido no encontrado' })
       }
       
-      // Solo el cliente puede cancelar (otros estados requieren ser emprendedor)
+      // Solo el cliente puede cancelar (otros estados requieren ser emprendedor o vendedor)
       if (estado !== 'cancelado') {
-        return res.status(403).json({ ok: false, error: 'Solo el emprendedor puede cambiar el estado a ' + estado })
+        return res.status(403).json({ ok: false, error: 'Solo el emprendedor o vendedor puede cambiar el estado a ' + estado })
       }
     }
     
@@ -367,6 +534,15 @@ router.patch('/:id/estado', auth, async (req, res) => {
     
     logger.success(`Estado del pedido ${id} actualizado a ${estado}`)
     
+    const pedidoActualizado = rows[0]
+    
+    // Obtener datos del emprendimiento para las notificaciones
+    const { rows: empDataRows } = await pool.query(
+      'SELECT nombre FROM emprendimientos WHERE id = $1',
+      [pedidoActualizado.emprendimiento_id]
+    )
+    const emprendimientoNombre = empDataRows[0]?.nombre || 'El emprendimiento'
+    
     // Emitir evento WebSocket al cliente
     const io = req.app.get('io')
     if (io && rows.length > 0) {
@@ -378,6 +554,67 @@ router.patch('/:id/estado', auth, async (req, res) => {
         tipo: 'cambio_estado'
       })
       logger.info(`📡 Evento WebSocket emitido: pedido:estado:${pedido.usuario_id}`)
+      
+      // Enviar notificaciones push según el estado
+      if (estado === 'en_camino') {
+        notificationService.notificarPedidoEnCamino(
+          pedido.usuario_id,
+          pedido,
+          { nombre: emprendimientoNombre }
+        ).catch(err => logger.error('Error enviando notificación push:', err.message))
+      } else if (estado === 'entregado') {
+        notificationService.notificarPedidoEntregado(
+          pedido.usuario_id,
+          pedido,
+          { nombre: emprendimientoNombre }
+        ).catch(err => logger.error('Error enviando notificación push:', err.message))
+      } else if (estado === 'rechazado') {
+        notificationService.notificarPedidoRechazado(
+          pedido.usuario_id,
+          pedido,
+          { nombre: emprendimientoNombre },
+          motivo_rechazo || 'No especificado'
+        ).catch(err => logger.error('Error enviando notificación push:', err.message))
+      }
+      
+      // También emitir al emprendedor y vendedor (si lo cambia un emprendedor o vendedor)
+      // Buscar emprendimiento para obtener el emprendedor y el vendedor
+      const { rows: empRows } = await pool.query(
+        'SELECT usuario_id FROM emprendimientos WHERE id = $1',
+        [pedido.emprendimiento_id]
+      )
+      
+      if (empRows.length > 0) {
+        // Notificar al emprendedor (no al que está haciendo el cambio)
+        const emprendedorId = empRows[0].usuario_id
+        if (emprendedorId !== userId) {
+          io.emit(`pedido:estado:${emprendedorId}`, {
+            pedidoId: id,
+            estado: estado,
+            pedido: pedido,
+            tipo: 'cambio_estado'
+          })
+          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${emprendedorId}`)
+        }
+      }
+      
+      // Buscar y notificar al vendedor (si existe y no es el que está haciendo el cambio)
+      const { rows: vendedorRows } = await pool.query(
+        'SELECT id FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
+        [pedido.emprendimiento_id, 'vendedor']
+      )
+      if (vendedorRows.length > 0) {
+        const vendedorId = vendedorRows[0].id
+        if (vendedorId !== userId) {
+          io.emit(`pedido:estado:${vendedorId}`, {
+            pedidoId: id,
+            estado: estado,
+            pedido: pedido,
+            tipo: 'cambio_estado'
+          })
+          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${vendedorId}`)
+        }
+      }
     }
     
     res.json({
@@ -439,12 +676,33 @@ router.patch('/:id/confirmar-cancelacion', auth, async (req, res) => {
     logger.info(`Confirmando cancelación del pedido ${id} por emprendedor ${userId}`)
     
     // Verificar que el pedido existe y pertenece a uno de los emprendimientos del usuario
-    const { rows: pedidoRows } = await pool.query(
-      `SELECT tc.* FROM transaccion_comercial tc
-       LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
-       WHERE tc.id = $1 AND e.usuario_id = $2 AND tc.estado = $3`,
-      [id, userId, 'cancelado']
-    )
+    const { tipo_usuario } = req.auth
+    let pedidoRows = []
+    
+    if (tipo_usuario === 'vendedor') {
+      // Vendedor: verificar que el pedido pertenece a su emprendimiento asignado
+      const { rows: userRows } = await pool.query(
+        'SELECT emprendimiento_asignado_id FROM usuarios WHERE id = $1',
+        [userId]
+      )
+      
+      if (userRows.length && userRows[0].emprendimiento_asignado_id) {
+        const { rows: vendedorRows } = await pool.query(
+          'SELECT tc.* FROM transaccion_comercial tc WHERE tc.id = $1 AND tc.emprendimiento_id = $2 AND tc.estado = $3',
+          [id, userRows[0].emprendimiento_asignado_id, 'cancelado']
+        )
+        pedidoRows = vendedorRows
+      }
+    } else {
+      // Emprendedor: verificar normalmente
+      const { rows: empRows } = await pool.query(
+        `SELECT tc.* FROM transaccion_comercial tc
+         LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
+         WHERE tc.id = $1 AND e.usuario_id = $2 AND tc.estado = $3`,
+        [id, userId, 'cancelado']
+      )
+      pedidoRows = empRows
+    }
     
     if (!pedidoRows.length) {
       return res.status(404).json({ ok: false, error: 'Pedido cancelado no encontrado' })

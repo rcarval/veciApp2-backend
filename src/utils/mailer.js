@@ -17,10 +17,13 @@ transporter.verify().then(()=>{
   logger.error('[mailer] Error verificando SMTP:', err && err.message)
 })
 
-async function sendMail({ to, subject, text }) {
+async function sendMail({ to, subject, text, html }) {
   const mailOptions = {
-    from: `${process.env.MAILTRAP_NAME || 'VeciApp'} <${process.env.MAILTRAP_FROM || 'demo@veciapp.test'}>` ,
-    to, subject, text
+    from: `${process.env.MAILTRAP_NAME || 'VeciApp'} <${process.env.MAILTRAP_FROM || 'demo@veciapp.test'}>`,
+    to, 
+    subject, 
+    text,
+    html // Soporte para HTML
   }
   logger.info(`📧 Enviando email a ${to}`)
   const info = await transporter.sendMail(mailOptions)

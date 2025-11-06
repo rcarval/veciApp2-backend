@@ -28,3 +28,10 @@ ORDER BY e.fecha_creacion DESC;
 -- Descomenta y reemplaza el ID:
 -- SELECT e.* FROM emprendimientos e WHERE e.id = 1;
 
+
+
+
+
+
+
+

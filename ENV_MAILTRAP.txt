@@ -1,0 +1,31 @@
+# =====================================================
+# Variables de Entorno para Mailtrap (Sistema de Email)
+# Agregar estas variables al archivo .env
+# =====================================================
+
+# Configuración de Mailtrap para envío de emails
+MAILTRAP_HOST=sandbox.smtp.mailtrap.io
+MAILTRAP_PORT=2525
+MAILTRAP_USER=tu_usuario_mailtrap_aqui
+MAILTRAP_PASS=tu_password_mailtrap_aqui
+MAILTRAP_NAME=VeciApp
+MAILTRAP_FROM=noreply@veciapp.test
+
+# URL del Frontend para generar enlaces de activación
+# Desarrollo:
+FRONTEND_URL=http://localhost:19006
+# Producción (cuando despliegues):
+# FRONTEND_URL=https://tu-dominio-veciapp.com
+
+# =====================================================
+# INSTRUCCIONES:
+# =====================================================
+# 1. Crea una cuenta en https://mailtrap.io (gratis)
+# 2. Ve a "Email Testing" > "Inboxes" > "My Inbox"
+# 3. Copia las credenciales SMTP:
+#    - Username (MAILTRAP_USER)
+#    - Password (MAILTRAP_PASS)
+# 4. Pega estos valores en tu archivo .env
+# 5. Reinicia el servidor backend
+# =====================================================
+

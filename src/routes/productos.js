@@ -158,12 +158,18 @@ router.get('/ofertas', async (req, res) => {
               e.nombre as emprendimiento_nombre, e.logo_url as emprendimiento_logo,
               e.background_url as emprendimiento_background, e.descripcion_corta as emprendimiento_descripcion,
               e.direccion as emprendimiento_direccion, e.telefono as emprendimiento_telefono,
-              e.categoria_principal, e.horarios, e.medios_pago, e.tipos_entrega
+              e.usuario_id as emprendimiento_usuario_id,
+              e.categoria_principal, e.horarios, e.medios_pago, e.tipos_entrega,
+              COALESCE(AVG(c.calificacion_general), 0)::NUMERIC(3,2) as calificacion_promedio,
+              COUNT(c.id)::INTEGER as total_calificaciones
        FROM productos p
        LEFT JOIN emprendimientos e ON p.emprendimiento_id = e.id
+       LEFT JOIN calificaciones_emprendimiento c ON e.id = c.emprendimiento_id
        WHERE p.activo = true 
          AND p.oferta = true
          AND e.estado = 'activo'
+       GROUP BY p.id, e.id, e.nombre, e.logo_url, e.background_url, e.descripcion_corta, 
+                e.direccion, e.telefono, e.usuario_id, e.categoria_principal, e.horarios, e.medios_pago, e.tipos_entrega
        ORDER BY p.fecha_creacion DESC`
     )
     

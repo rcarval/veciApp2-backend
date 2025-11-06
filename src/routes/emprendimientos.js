@@ -8,6 +8,9 @@ const fs = require('fs')
 const { port, serverIp } = require('../config/env')
 const multer = require('multer')
 const bcrypt = require('bcrypt')
+const crypto = require('crypto')
+const { sendMail } = require('../utils/mailer')
+const { emailActivacionVendedor, emailConfirmacionActivacion } = require('../utils/emailTemplates')
 
 // Configuración de Twilio Verify para SMS
 const twilioClient = require('twilio')(
@@ -174,9 +177,12 @@ router.get('/', async (req, res) => {
               e.tipos_entrega, e.costo_delivery, e.latitud, e.longitud, e.estado,
               e.fecha_creacion, e.fecha_actualizacion,
               u.nombre as usuario_nombre, u.telefono as usuario_telefono,
-              u.plan_id as usuario_plan_id
+              u.plan_id as usuario_plan_id,
+              COALESCE(AVG(c.calificacion_general), 0)::NUMERIC(3,2) as calificacion_promedio,
+              COUNT(c.id)::INTEGER as total_calificaciones
        FROM emprendimientos e
        LEFT JOIN usuarios u ON e.usuario_id = u.id
+       LEFT JOIN calificaciones_emprendimiento c ON e.id = c.emprendimiento_id
        WHERE e.estado = 'activo'`
     
     const params = []
@@ -187,7 +193,8 @@ router.get('/', async (req, res) => {
       params.push(categoria)
     }
     
-    query += ` ORDER BY e.fecha_creacion DESC`
+    query += ` GROUP BY e.id, u.nombre, u.telefono, u.plan_id
+               ORDER BY e.fecha_creacion DESC`
     
     const { rows } = await pool.query(query, params)
     
@@ -228,7 +235,7 @@ router.post('/:id/vendedor', auth, async (req, res) => {
     
     // Verificar que el emprendimiento existe y pertenece al usuario
     const { rows: empRows } = await pool.query(
-      'SELECT id FROM emprendimientos WHERE id = $1 AND usuario_id = $2',
+      'SELECT id, nombre FROM emprendimientos WHERE id = $1 AND usuario_id = $2',
       [emprendimientoId, userId]
     )
     
@@ -259,21 +266,60 @@ router.post('/:id/vendedor', auth, async (req, res) => {
       return res.status(409).json({ ok: false, error: 'El correo ya está registrado' })
     }
     
-    // Crear usuario vendedor
+    // Generar token de activación único
+    const tokenActivacion = crypto.randomBytes(32).toString('hex')
+    
+    // Crear usuario vendedor con estado 'pendiente_activacion'
     const hash = await bcrypt.hash(contrasena, 10)
     
     const { rows } = await pool.query(
-      `INSERT INTO usuarios (nombre, correo, contrasena, tipo_usuario, estado, email_verificado, emprendimiento_asignado_id)
-       VALUES ($1, LOWER($2), $3, 'vendedor', 'activo', true, $4)
+      `INSERT INTO usuarios (nombre, correo, contrasena, tipo_usuario, estado, email_verificado, emprendimiento_asignado_id, token_activacion, token_activacion_expira)
+       VALUES ($1, LOWER($2), $3, 'vendedor', 'pendiente_activacion', false, $4, $5, NOW() + INTERVAL '24 hours')
        RETURNING id, nombre, correo, tipo_usuario, estado, emprendimiento_asignado_id, created_at`,
-      [nombre, correo, hash, emprendimientoId]
+      [nombre, correo, hash, emprendimientoId, tokenActivacion]
     )
     
-    logger.success(`Vendedor creado: ID ${rows[0].id}`)
+    const vendedorCreado = rows[0]
+    logger.success(`Vendedor creado: ID ${vendedorCreado.id}`)
+    
+    // Generar enlace de activación (apunta al backend)
+    const enlaceActivacion = `http://${serverIp}:${port}/api/emprendimientos/activar-vendedor/${tokenActivacion}`
+    
+    // Enviar correo de activación
+    try {
+      const htmlContent = emailActivacionVendedor({
+        nombre,
+        emprendimientoNombre: empRows[0].nombre || 'tu emprendimiento',
+        enlaceActivacion
+      })
+      
+      await sendMail({
+        to: correo,
+        subject: '🎉 Activa tu cuenta de Vendedor en VeciApp',
+        text: `Hola ${nombre},
+
+¡Bienvenido a VeciApp! 🎊
+
+Has sido invitado a ser vendedor del emprendimiento "${empRows[0].nombre}".
+
+Para activar tu cuenta, visita: ${enlaceActivacion}
+
+⚠️ Este enlace expirará en 24 horas.
+
+---
+VeciApp - Tu comunidad, más conectada`,
+        html: htmlContent
+      })
+      logger.success(`📧 Correo de activación enviado a ${correo}`)
+    } catch (emailError) {
+      logger.error('Error enviando correo de activación:', emailError.message)
+      // No detener el proceso si falla el email, el vendedor aún se creó
+    }
+    
     res.status(201).json({
       ok: true,
-      mensaje: 'Vendedor creado exitosamente',
-      vendedor: rows[0]
+      mensaje: 'Vendedor creado exitosamente. Se ha enviado un correo de activación.',
+      vendedor: vendedorCreado
     })
   } catch (err) {
     logger.error('Error creando vendedor:', err.message)
@@ -302,7 +348,7 @@ router.get('/:id/vendedor', auth, async (req, res) => {
     
     // Buscar vendedor asignado
     const { rows } = await pool.query(
-      'SELECT id, nombre, correo, tipo_usuario, estado, emprendimiento_asignado_id, created_at FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
+      'SELECT id, nombre, correo, tipo_usuario, estado, email_verificado, emprendimiento_asignado_id, created_at FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
       [emprendimientoId, 'vendedor']
     )
     
@@ -310,7 +356,7 @@ router.get('/:id/vendedor', auth, async (req, res) => {
       return res.json({ ok: true, vendedor: null })
     }
     
-    logger.success(`Vendedor encontrado: ID ${rows[0].id}`)
+    logger.success(`Vendedor encontrado: ID ${rows[0].id} - Estado: ${rows[0].estado}`)
     res.json({ ok: true, vendedor: rows[0] })
   } catch (err) {
     logger.error('Error obteniendo vendedor:', err.message)
@@ -352,6 +398,241 @@ router.delete('/:id/vendedor', auth, async (req, res) => {
   } catch (err) {
     logger.error('Error eliminando vendedor:', err.message)
     res.status(500).json({ ok: false, error: 'Error interno' })
+  }
+})
+
+// GET /api/emprendimientos/activar-vendedor/:token - Activar cuenta de vendedor
+router.get('/activar-vendedor/:token', async (req, res) => {
+  try {
+    const { token } = req.params
+    
+    logger.info(`Intentando activar vendedor con token: ${token.substring(0, 8)}...`)
+    
+    // Buscar vendedor con ese token
+    const { rows } = await pool.query(
+      `SELECT id, nombre, correo, token_activacion_expira 
+       FROM usuarios 
+       WHERE token_activacion = $1 
+       AND tipo_usuario = 'vendedor' 
+       AND estado = 'pendiente_activacion'`,
+      [token]
+    )
+    
+    if (!rows.length) {
+      logger.warn('Token de activación no válido o ya usado')
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Error de Activación - VeciApp</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+            .container { background: white; border-radius: 20px; padding: 40px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
+            .icon { font-size: 80px; margin-bottom: 20px; }
+            h1 { color: #e74c3c; font-size: 28px; margin-bottom: 15px; }
+            p { color: #555; font-size: 16px; line-height: 1.6; margin-bottom: 30px; }
+            .help { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 8px; margin-top: 20px; text-align: left; }
+            .help-title { color: #856404; font-weight: bold; margin-bottom: 8px; }
+            .help-text { color: #856404; font-size: 14px; line-height: 1.5; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="icon">❌</div>
+            <h1>Error de Activación</h1>
+            <p>El enlace de activación no es válido o ya ha sido utilizado.</p>
+            <div class="help">
+              <div class="help-title">¿Necesitas ayuda?</div>
+              <div class="help-text">
+                • El enlace puede haber expirado (24 horas)<br>
+                • La cuenta puede haber sido activada anteriormente<br>
+                • Contacta al administrador del emprendimiento
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+      `)
+    }
+    
+    const vendedor = rows[0]
+    
+    // Verificar si el token expiró
+    if (new Date() > new Date(vendedor.token_activacion_expira)) {
+      logger.warn(`Token expirado para vendedor ${vendedor.id}`)
+      return res.send(`
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Enlace Expirado - VeciApp</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+            .container { background: white; border-radius: 20px; padding: 40px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
+            .icon { font-size: 80px; margin-bottom: 20px; }
+            h1 { color: #f39c12; font-size: 28px; margin-bottom: 15px; }
+            p { color: #555; font-size: 16px; line-height: 1.6; margin-bottom: 30px; }
+            .help { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 8px; margin-top: 20px; text-align: left; }
+            .help-title { color: #856404; font-weight: bold; margin-bottom: 8px; }
+            .help-text { color: #856404; font-size: 14px; line-height: 1.5; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="icon">⏰</div>
+            <h1>Enlace Expirado</h1>
+            <p>El enlace de activación ha expirado. Los enlaces son válidos solo por 24 horas.</p>
+            <div class="help">
+              <div class="help-title">¿Qué puedo hacer?</div>
+              <div class="help-text">
+                • Contacta al administrador del emprendimiento<br>
+                • Solicita que te elimine y cree nuevamente<br>
+                • Recibirás un nuevo correo de activación
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+      `)
+    }
+    
+    // Activar vendedor
+    await pool.query(
+      `UPDATE usuarios 
+       SET estado = 'activo', 
+           email_verificado = true, 
+           token_activacion = NULL, 
+           token_activacion_expira = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [vendedor.id]
+    )
+    
+    logger.success(`✅ Vendedor activado: ${vendedor.nombre} (${vendedor.correo})`)
+    
+    // Enviar correo de confirmación
+    try {
+      const htmlContent = emailConfirmacionActivacion({
+        nombre: vendedor.nombre,
+        correo: vendedor.correo
+      })
+      
+      await sendMail({
+        to: vendedor.correo,
+        subject: '✅ Cuenta Activada - VeciApp',
+        text: `Hola ${vendedor.nombre},
+
+¡Tu cuenta de vendedor ha sido activada exitosamente! 🎉
+
+Ya puedes iniciar sesión en VeciApp.
+📧 Correo: ${vendedor.correo}
+🔑 Contraseña: La que configuraste
+
+---
+VeciApp - Tu comunidad, más conectada`,
+        html: htmlContent
+      })
+      logger.success(`📧 Correo de confirmación enviado a ${vendedor.correo}`)
+    } catch (emailError) {
+      logger.error('Error enviando correo de confirmación:', emailError.message)
+    }
+    
+    // Retornar página HTML de éxito
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="es">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Cuenta Activada - VeciApp</title>
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+          .container { background: white; border-radius: 20px; padding: 40px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; animation: slideIn 0.5s ease-out; }
+          @keyframes slideIn { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
+          .icon { font-size: 80px; margin-bottom: 20px; animation: bounce 1s ease-in-out; }
+          @keyframes bounce { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-20px); } }
+          h1 { color: #27ae60; font-size: 32px; margin-bottom: 15px; }
+          .subtitle { color: #666; font-size: 18px; margin-bottom: 30px; }
+          .info-box { background: #e8f5e9; border-radius: 12px; padding: 20px; margin-bottom: 25px; text-align: left; }
+          .info-item { display: flex; align-items: center; margin-bottom: 12px; color: #2c3e50; font-size: 15px; }
+          .info-item:last-child { margin-bottom: 0; }
+          .info-icon { margin-right: 10px; font-size: 18px; }
+          .instructions { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 15px; border-radius: 8px; margin-top: 20px; text-align: left; }
+          .instructions-title { color: #1976D2; font-weight: bold; margin-bottom: 8px; font-size: 16px; }
+          .instructions-text { color: #1976D2; font-size: 14px; line-height: 1.6; }
+          .footer { margin-top: 30px; padding-top: 20px; border-top: 2px solid #ecf0f1; color: #95a5a6; font-size: 13px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="icon">✅</div>
+          <h1>¡Cuenta Activada!</h1>
+          <p class="subtitle">Tu cuenta de vendedor ha sido activada exitosamente</p>
+          
+          <div class="info-box">
+            <div class="info-item">
+              <span class="info-icon">👤</span>
+              <strong>Nombre:</strong>&nbsp;${vendedor.nombre}
+            </div>
+            <div class="info-item">
+              <span class="info-icon">📧</span>
+              <strong>Correo:</strong>&nbsp;${vendedor.correo}
+            </div>
+            <div class="info-item">
+              <span class="info-icon">🔐</span>
+              <strong>Estado:</strong>&nbsp;Activo
+            </div>
+          </div>
+          
+          <div class="instructions">
+            <div class="instructions-title">📱 Próximos Pasos</div>
+            <div class="instructions-text">
+              1. Abre la aplicación VeciApp en tu dispositivo móvil<br>
+              2. Inicia sesión con tu correo y contraseña<br>
+              3. Comienza a gestionar los pedidos del emprendimiento
+            </div>
+          </div>
+          
+          <div class="footer">
+            <strong>VeciApp</strong> - Tu comunidad, más conectada
+          </div>
+        </div>
+      </body>
+      </html>
+    `)
+  } catch (err) {
+    logger.error('Error activando vendedor:', err.message)
+    res.send(`
+      <!DOCTYPE html>
+      <html lang="es">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Error - VeciApp</title>
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+          .container { background: white; border-radius: 20px; padding: 40px; max-width: 500px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); text-align: center; }
+          .icon { font-size: 80px; margin-bottom: 20px; }
+          h1 { color: #e74c3c; font-size: 28px; margin-bottom: 15px; }
+          p { color: #555; font-size: 16px; line-height: 1.6; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="icon">⚠️</div>
+          <h1>Error del Servidor</h1>
+          <p>Ocurrió un error al procesar tu solicitud. Por favor contacta al soporte.</p>
+        </div>
+      </body>
+      </html>
+    `)
   }
 })
 

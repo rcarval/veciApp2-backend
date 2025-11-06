@@ -17,3 +17,10 @@ module.exports = function auth(req, res, next) {
     return res.status(401).json({ error: 'Token inválido o expirado' })
   }
 }
+
+
+
+
+
+
+

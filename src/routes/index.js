@@ -7,7 +7,7 @@ router.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: new Date().toISOString() })
 })
 
-logger.success('✓ Rutas cargadas: /auth, /comunas, /direcciones, /emprendimientos, /emprendimientos/:id/productos, /auth/suscripcion, /pedidos, /estadisticas, /busqueda, /favoritos, /categorias, /admin')
+logger.success('✓ Rutas cargadas: /auth, /comunas, /direcciones, /emprendimientos, /emprendimientos/:id/productos, /auth/suscripcion, /pedidos, /estadisticas, /estadisticas-avanzadas, /busqueda, /favoritos, /categorias, /admin, /reportes, /cupones, /notificaciones')
 
 router.use('/auth', require('./auth'))
 router.use('/comunas', require('./comunas'))
@@ -15,10 +15,14 @@ router.use('/direcciones', require('./direcciones'))
 router.use('/pedidos', require('./pedidos'))
 router.use('/emprendimientos', require('./emprendimientos'))
 router.use('/estadisticas', require('./estadisticas'))
+router.use('/estadisticas-avanzadas', require('./estadisticasAvanzadas'))
 router.use('/busqueda', require('./busqueda'))
 router.use('/favoritos', require('./favoritos'))
 router.use('/categorias', require('./categorias'))
 router.use('/admin', require('./admin'))
+router.use('/reportes', require('./reportes'))
+router.use('/cupones', require('./cupones'))
+router.use('/notificaciones', require('./notificaciones'))
 router.use('/', require('./productos')) // Productos después para capturar rutas anidadas
 
 module.exports = router

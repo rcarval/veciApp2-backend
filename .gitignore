@@ -7,6 +7,10 @@ yarn.lock
 .env
 .env.local
 
+# Firebase credentials
+src/config/firebase-adminsdk.json
+firebase-adminsdk*.json
+
 # Logs
 logs/
 *.log
@@ -34,4 +38,11 @@ coverage/
 # Build
 dist/
 build/
+
+
+
+
+
+
+
 

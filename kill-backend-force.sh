@@ -20,3 +20,10 @@ echo "🗑️  Eliminando procesos..."
 echo $PIDS | xargs kill -9 2>/dev/null
 echo "✅ Procesos eliminados"
 
+
+
+
+
+
+
+

@@ -134,6 +134,9 @@ router.get('/:emprendimientoId', auth, async (req, res) => {
           // Formato "YYYY-MM"
           const [ano, mes] = row.mes.split('-')
           fecha = new Date(parseInt(ano), parseInt(mes) - 1, 1)
+        } else if (row.fecha) {
+          // Campo 'fecha' de visualizaciones_diarias (DATE)
+          fecha = row.fecha instanceof Date ? row.fecha : new Date(row.fecha)
         } else if (row.dia) {
           // DATE_TRUNC devuelve un Date object
           fecha = row.dia instanceof Date ? row.dia : new Date(row.dia)
@@ -173,44 +176,45 @@ router.get('/:emprendimientoId', auth, async (req, res) => {
     }
     
     // Obtener visualizaciones distribuidas por período (para gráficos)
-    // Usamos DATE_TRUNC para agrupar y luego calculamos índices simples
-    // Año: últimos 12 meses
+    // Usamos visualizaciones_diarias (optimizado) para períodos largos
+    // Para día necesitamos más granularidad, usamos visualizaciones_emprendimiento
+    
+    // Año: últimos 12 meses - usar visualizaciones_diarias agregadas por mes
     const { rows: visualizacionesAñoDistribuidas } = await pool.query(
       `SELECT 
-         TO_CHAR(fecha_visualizacion, 'YYYY-MM') as mes,
-         COUNT(*) as visualizaciones
-       FROM visualizaciones_emprendimiento
-       WHERE emprendimiento_id = $1 AND fecha_visualizacion >= $2
+         TO_CHAR(fecha, 'YYYY-MM') as mes,
+         SUM(contador) as visualizaciones
+       FROM visualizaciones_diarias
+       WHERE emprendimiento_id = $1 AND fecha >= $2
        GROUP BY mes
        ORDER BY mes`,
       [emprendimientoId, fechaAñoInicio]
     )
     
-    // Mes: últimos 30 días agrupados en 5 puntos
+    // Mes: últimos 30 días agrupados en 5 puntos - usar visualizaciones_diarias
     const { rows: visualizacionesMesDistribuidas } = await pool.query(
       `SELECT 
-         DATE_TRUNC('day', fecha_visualizacion) as dia,
-         COUNT(*) as visualizaciones
-       FROM visualizaciones_emprendimiento
-       WHERE emprendimiento_id = $1 AND fecha_visualizacion >= $2
-       GROUP BY dia
+         fecha as dia,
+         contador as visualizaciones
+       FROM visualizaciones_diarias
+       WHERE emprendimiento_id = $1 AND fecha >= $2
        ORDER BY dia`,
       [emprendimientoId, fechaMesInicio]
     )
     
-    // Semana: últimos 7 días
+    // Semana: últimos 7 días - usar visualizaciones_diarias
     const { rows: visualizacionesSemanaDistribuidas } = await pool.query(
       `SELECT 
-         DATE_TRUNC('day', fecha_visualizacion) as dia,
-         COUNT(*) as visualizaciones
-       FROM visualizaciones_emprendimiento
-       WHERE emprendimiento_id = $1 AND fecha_visualizacion >= $2
-       GROUP BY dia
+         fecha as dia,
+         contador as visualizaciones
+       FROM visualizaciones_diarias
+       WHERE emprendimiento_id = $1 AND fecha >= $2
        ORDER BY dia`,
       [emprendimientoId, fechaSemanaInicio]
     )
     
-    // Día: últimos 24 horas agrupados en 8 puntos (cada 3 horas)
+    // Día: últimos 24 horas - mantener visualizaciones_emprendimiento para granularidad horaria
+    // Esto sigue siendo necesario para ver el detalle del día actual
     const { rows: visualizacionesDiaDistribuidas } = await pool.query(
       `SELECT 
          DATE_TRUNC('hour', fecha_visualizacion) as hora,
@@ -331,10 +335,9 @@ router.post('/:emprendimientoId/registrar-visualizacion', async (req, res) => {
     
     logger.info(`Registrando visualización del emprendimiento ${emprendimientoId}`)
     
-    // Insertar visualización
+    // Incrementar contador diario usando función optimizada
     await pool.query(
-      `INSERT INTO visualizaciones_emprendimiento (emprendimiento_id)
-       VALUES ($1)`,
+      `SELECT incrementar_visualizacion($1)`,
       [emprendimientoId]
     )
     
