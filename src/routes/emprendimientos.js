@@ -145,6 +145,7 @@ router.get('/mis-emprendimientos', auth, async (req, res) => {
               categoria_principal, subcategorias, horarios, medios_pago, 
               tipos_entrega, costo_delivery, latitud, longitud, estado,
               es_borrador, emprendimiento_original_id,
+              comunas_cobertura, modalidad_delivery, config_delivery,
               fecha_creacion, fecha_actualizacion
        FROM emprendimientos 
        WHERE usuario_id = $1 AND estado != 'inactivo'
@@ -175,6 +176,7 @@ router.get('/', async (req, res) => {
               e.comuna_id, e.direccion, e.telefono, e.logo_url, e.background_url,
               e.categoria_principal, e.subcategorias, e.horarios, e.medios_pago, 
               e.tipos_entrega, e.costo_delivery, e.latitud, e.longitud, e.estado,
+              e.comunas_cobertura, e.modalidad_delivery, e.config_delivery,
               e.fecha_creacion, e.fecha_actualizacion,
               u.nombre as usuario_nombre, u.telefono as usuario_telefono,
               u.plan_id as usuario_plan_id,
@@ -812,7 +814,7 @@ router.post('/', auth, async (req, res) => {
       nombre, descripcion_corta, descripcion_larga, comuna_id,
       direccion, telefono, categoria_principal, subcategorias,
       horarios, medios_pago, tipos_entrega, costo_delivery,
-      latitud, longitud
+      latitud, longitud, comunasCobertura, modalidadDelivery, configDelivery
     } = req.body || {}
     
     logger.info(`Creando emprendimiento para usuario ${userId}: ${nombre}`)
@@ -825,12 +827,14 @@ router.post('/', auth, async (req, res) => {
       INSERT INTO emprendimientos 
       (usuario_id, nombre, descripcion_corta, descripcion_larga, comuna_id,
        direccion, telefono, categoria_principal, subcategorias, horarios,
-       medios_pago, tipos_entrega, costo_delivery, latitud, longitud, estado)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'verificacion')
+       medios_pago, tipos_entrega, costo_delivery, latitud, longitud,
+       comunas_cobertura, modalidad_delivery, config_delivery, estado)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'verificacion')
       RETURNING id, nombre, descripcion_corta, descripcion_larga, comuna_id,
                 direccion, telefono, logo_url, background_url, categoria_principal,
                 subcategorias, horarios, medios_pago, tipos_entrega, costo_delivery,
-                latitud, longitud, estado, fecha_creacion
+                latitud, longitud, comunas_cobertura, modalidad_delivery, config_delivery,
+                estado, fecha_creacion
     `
     
     const { rows } = await pool.query(insert, [
@@ -838,7 +842,9 @@ router.post('/', auth, async (req, res) => {
       comuna_id || null, direccion, telefono || null, categoria_principal || null,
       JSON.stringify(subcategorias || []), JSON.stringify(horarios || {}),
       JSON.stringify(medios_pago || {}), JSON.stringify(tipos_entrega || {}),
-      costo_delivery || null, latitud || null, longitud || null
+      costo_delivery || null, latitud || null, longitud || null,
+      JSON.stringify(comunasCobertura || []), modalidadDelivery || null,
+      JSON.stringify(configDelivery || {})
     ])
     
     logger.success(`Emprendimiento creado en estado 'verificacion': ID ${rows[0].id}`)
@@ -863,7 +869,7 @@ router.put('/:id', auth, async (req, res) => {
       nombre, descripcion_corta, descripcion_larga, comuna_id,
       direccion, telefono, categoria_principal, subcategorias,
       horarios, medios_pago, tipos_entrega, costo_delivery,
-      latitud, longitud
+      latitud, longitud, comunasCobertura, modalidadDelivery, configDelivery
     } = req.body || {}
     
     logger.info(`Actualizando emprendimiento ${id} del usuario ${userId}`)
@@ -898,12 +904,14 @@ router.put('/:id', auth, async (req, res) => {
         (usuario_id, nombre, descripcion_corta, descripcion_larga, comuna_id,
          direccion, telefono, categoria_principal, subcategorias, horarios,
          medios_pago, tipos_entrega, costo_delivery, latitud, longitud,
+         comunas_cobertura, modalidad_delivery, config_delivery,
          logo_url, background_url, estado, es_borrador, emprendimiento_original_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'verificacion', true, $18)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'verificacion', true, $21)
         RETURNING id, nombre, descripcion_corta, descripcion_larga, comuna_id,
                   direccion, telefono, logo_url, background_url, categoria_principal,
                   subcategorias, horarios, medios_pago, tipos_entrega, costo_delivery,
-                  latitud, longitud, estado, es_borrador, emprendimiento_original_id, fecha_creacion
+                  latitud, longitud, comunas_cobertura, modalidad_delivery, config_delivery,
+                  estado, es_borrador, emprendimiento_original_id, fecha_creacion
       `
       
       const { rows: borradorRows } = await pool.query(insertBorrador, [
@@ -912,6 +920,8 @@ router.put('/:id', auth, async (req, res) => {
         JSON.stringify(subcategorias || []), JSON.stringify(horarios || {}),
         JSON.stringify(medios_pago || {}), JSON.stringify(tipos_entrega || {}),
         costo_delivery || null, latitud || null, longitud || null,
+        JSON.stringify(comunasCobertura || []), modalidadDelivery || null,
+        JSON.stringify(configDelivery || {}),
         emprendimientoOriginal.logo_url, emprendimientoOriginal.background_url, id
       ])
       
@@ -945,19 +955,25 @@ router.put('/:id', auth, async (req, res) => {
         costo_delivery = COALESCE($14, costo_delivery),
         latitud = COALESCE($15, latitud),
         longitud = COALESCE($16, longitud),
+        comunas_cobertura = COALESCE($17::jsonb, comunas_cobertura),
+        modalidad_delivery = COALESCE($18, modalidad_delivery),
+        config_delivery = COALESCE($19::jsonb, config_delivery),
         fecha_actualizacion = NOW()
       WHERE id = $1 AND usuario_id = $2
       RETURNING id, nombre, descripcion_corta, descripcion_larga, comuna_id,
                 direccion, telefono, logo_url, background_url, categoria_principal,
                 subcategorias, horarios, medios_pago, tipos_entrega, costo_delivery,
-                latitud, longitud, estado, es_borrador, emprendimiento_original_id, fecha_creacion, fecha_actualizacion
+                latitud, longitud, comunas_cobertura, modalidad_delivery, config_delivery,
+                estado, es_borrador, emprendimiento_original_id, fecha_creacion, fecha_actualizacion
     `
     
     const { rows } = await pool.query(update, [
       id, userId, nombre, descripcion_corta, descripcion_larga, comuna_id,
       direccion, telefono, categoria_principal, JSON.stringify(subcategorias),
       JSON.stringify(horarios), JSON.stringify(medios_pago),
-      JSON.stringify(tipos_entrega), costo_delivery, latitud, longitud
+      JSON.stringify(tipos_entrega), costo_delivery, latitud, longitud,
+      JSON.stringify(comunasCobertura), modalidadDelivery,
+      JSON.stringify(configDelivery)
     ])
     
     logger.success(`Emprendimiento ${id} actualizado, requiere verificación`)
@@ -1187,7 +1203,8 @@ router.post('/:id/verificar-codigo', auth, async (req, res) => {
       `SELECT id, nombre, estado, codigo_verificacion, codigo_enviado_at, es_borrador, emprendimiento_original_id,
               usuario_id, descripcion_corta, descripcion_larga, comuna_id, direccion, telefono,
               categoria_principal, subcategorias, horarios, medios_pago, tipos_entrega, costo_delivery,
-              latitud, longitud, logo_url, background_url
+              latitud, longitud, comunas_cobertura, modalidad_delivery, config_delivery,
+              logo_url, background_url
        FROM emprendimientos 
        WHERE id = $1 AND usuario_id = $2`,
       [emprendimientoId, userId]
@@ -1296,8 +1313,11 @@ router.post('/:id/verificar-codigo', auth, async (req, res) => {
              costo_delivery = $13,
              latitud = $14,
              longitud = $15,
-             logo_url = $16,
-             background_url = $17,
+             comunas_cobertura = $16::jsonb,
+             modalidad_delivery = $17,
+             config_delivery = $18::jsonb,
+             logo_url = $19,
+             background_url = $20,
              estado = 'pendiente',
              verificado_at = NOW(),
              fecha_actualizacion = NOW()
@@ -1305,7 +1325,8 @@ router.post('/:id/verificar-codigo', auth, async (req, res) => {
          RETURNING id, nombre, descripcion_corta, descripcion_larga, comuna_id,
                    direccion, telefono, logo_url, background_url, categoria_principal,
                    subcategorias, horarios, medios_pago, tipos_entrega, costo_delivery,
-                   latitud, longitud, estado, verificado_at`,
+                   latitud, longitud, comunas_cobertura, modalidad_delivery, config_delivery,
+                   estado, verificado_at`,
         [
           emprendimiento.emprendimiento_original_id,
           emprendimiento.nombre,
@@ -1322,6 +1343,9 @@ router.post('/:id/verificar-codigo', auth, async (req, res) => {
           emprendimiento.costo_delivery,
           emprendimiento.latitud,
           emprendimiento.longitud,
+          JSON.stringify(emprendimiento.comunas_cobertura || []),
+          emprendimiento.modalidad_delivery,
+          JSON.stringify(emprendimiento.config_delivery || {}),
           emprendimiento.logo_url,
           emprendimiento.background_url
         ]
