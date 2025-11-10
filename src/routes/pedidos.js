@@ -261,6 +261,17 @@ router.post('/', auth, async (req, res) => {
       ).catch(err => logger.error('Error enviando notificación push:', err.message))
     }
     
+    // ✅ También emitir al CLIENTE para que actualice su popup
+    if (io) {
+      io.emit(`pedido:estado:${userId}`, {
+        pedido: rows[0],
+        pedidoId: rows[0].id,
+        estado: 'pendiente',
+        tipo: 'pedido_creado'
+      })
+      logger.info(`📡 Evento WebSocket emitido al cliente: pedido:estado:${userId}`)
+    }
+    
     // También emitir al vendedor asignado al emprendimiento (si existe)
     const { rows: vendedorRows } = await pool.query(
       'SELECT id, nombre FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
