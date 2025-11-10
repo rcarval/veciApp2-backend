@@ -440,34 +440,34 @@ router.patch('/:id/confirmar', auth, async (req, res) => {
       )
       
       if (empRows.length > 0) {
+        // ✅ SIEMPRE emitir al emprendedor (para actualizar su contador de badge)
         const emprendedorId = empRows[0].usuario_id
-        if (emprendedorId !== userId) {
-          io.emit(`pedido:estado:${emprendedorId}`, {
-            pedidoId: id,
-            estado: 'confirmado',
-            pedido: pedido,
-            tipo: 'pedido_confirmado'
-          })
-          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${emprendedorId}`)
-        }
+        io.emit(`pedido:estado:${emprendedorId}`, {
+          pedidoId: id,
+          estado: 'confirmado',
+          pedido: pedido,
+          tipo: 'pedido_confirmado',
+          esPropio: emprendedorId === userId
+        })
+        logger.info(`📡 Evento WebSocket emitido: pedido:estado:${emprendedorId} (propio: ${emprendedorId === userId})`)
       }
       
-      // Buscar y notificar al vendedor (si existe y no es el que está confirmando)
+      // Buscar y notificar al vendedor (si existe)
       const { rows: vendedorRows } = await pool.query(
         'SELECT id FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
         [pedido.emprendimiento_id, 'vendedor']
       )
       if (vendedorRows.length > 0) {
+        // ✅ SIEMPRE emitir al vendedor (para actualizar su contador)
         const vendedorId = vendedorRows[0].id
-        if (vendedorId !== userId) {
-          io.emit(`pedido:estado:${vendedorId}`, {
-            pedidoId: id,
-            estado: 'confirmado',
-            pedido: pedido,
-            tipo: 'pedido_confirmado'
-          })
-          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${vendedorId}`)
-        }
+        io.emit(`pedido:estado:${vendedorId}`, {
+          pedidoId: id,
+          estado: 'confirmado',
+          pedido: pedido,
+          tipo: 'pedido_confirmado',
+          esPropio: vendedorId === userId
+        })
+        logger.info(`📡 Evento WebSocket emitido: pedido:estado:${vendedorId} (propio: ${vendedorId === userId})`)
       }
     }
     
@@ -623,35 +623,34 @@ router.patch('/:id/estado', auth, async (req, res) => {
       )
       
       if (empRows.length > 0) {
-        // Notificar al emprendedor (no al que está haciendo el cambio)
+        // ✅ SIEMPRE emitir al emprendedor (para actualizar su contador de badge)
         const emprendedorId = empRows[0].usuario_id
-        if (emprendedorId !== userId) {
-          io.emit(`pedido:estado:${emprendedorId}`, {
-            pedidoId: id,
-            estado: estado,
-            pedido: pedido,
-            tipo: 'cambio_estado'
-          })
-          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${emprendedorId}`)
-        }
+        io.emit(`pedido:estado:${emprendedorId}`, {
+          pedidoId: id,
+          estado: estado,
+          pedido: pedido,
+          tipo: 'cambio_estado',
+          esPropio: emprendedorId === userId // Flag para saber si es su propia acción
+        })
+        logger.info(`📡 Evento WebSocket emitido: pedido:estado:${emprendedorId} (propio: ${emprendedorId === userId})`)
       }
       
-      // Buscar y notificar al vendedor (si existe y no es el que está haciendo el cambio)
+      // Buscar y notificar al vendedor (si existe)
       const { rows: vendedorRows } = await pool.query(
         'SELECT id FROM usuarios WHERE emprendimiento_asignado_id = $1 AND tipo_usuario = $2',
         [pedido.emprendimiento_id, 'vendedor']
       )
       if (vendedorRows.length > 0) {
+        // ✅ SIEMPRE emitir al vendedor (para actualizar su contador)
         const vendedorId = vendedorRows[0].id
-        if (vendedorId !== userId) {
-          io.emit(`pedido:estado:${vendedorId}`, {
-            pedidoId: id,
-            estado: estado,
-            pedido: pedido,
-            tipo: 'cambio_estado'
-          })
-          logger.info(`📡 Evento WebSocket emitido: pedido:estado:${vendedorId}`)
-        }
+        io.emit(`pedido:estado:${vendedorId}`, {
+          pedidoId: id,
+          estado: estado,
+          pedido: pedido,
+          tipo: 'cambio_estado',
+          esPropio: vendedorId === userId
+        })
+        logger.info(`📡 Evento WebSocket emitido: pedido:estado:${vendedorId} (propio: ${vendedorId === userId})`)
       }
     }
     
