@@ -165,14 +165,18 @@ router.post('/', auth, async (req, res) => {
     const { id: userId } = req.auth
     const {
       emprendimiento_id,
-      productos, // Array de { producto_id, nombre, cantidad, precio_unitario }
+      productos, // Array de { producto_id, nombre, cantidad, precio_unitario, precio_oferta }
       direccion_entrega,
       telefono_cliente,
-      modo_entrega // 'delivery' o 'retiro'
+      modo_entrega, // 'delivery' o 'retiro'
+      costo_delivery, // ✅ Costo de delivery
+      cupon_aplicado, // ✅ Info del cupón { codigo, tipo_beneficio, valor, descuento_aplicado }
+      subtotal, // ✅ Subtotal sin delivery ni descuentos
+      total // ✅ Total final del frontend
     } = req.body || {}
     
     logger.info(`Creando pedido para emprendimiento ${emprendimiento_id}`)
-    logger.db(`Body recibido: ${JSON.stringify({ emprendimiento_id, productos: productos?.length || 0, direccion_entrega, modo_entrega })}`)
+    logger.db(`Body recibido: ${JSON.stringify({ emprendimiento_id, productos: productos?.length || 0, direccion_entrega, modo_entrega, costo_delivery, cupon_aplicado, subtotal, total })}`)
     
     // Validar campos obligatorios
     if (!emprendimiento_id || !productos || !Array.isArray(productos) || productos.length === 0) {
@@ -193,32 +197,55 @@ router.post('/', auth, async (req, res) => {
       return res.status(404).json({ ok: false, error: 'Emprendimiento no encontrado' })
     }
     
-    // Calcular total
-    const total = productos.reduce((sum, prod) => {
-      return sum + (prod.cantidad * prod.precio_unitario)
-    }, 0)
+    // Calcular total en el backend (validación)
+    const subtotalCalculado = productos.reduce((sum, prod) => {
+      // Usar precio de oferta si existe, si no usar precio normal
+      const precioFinal = (prod.precio_oferta && prod.precio_oferta > 0) ? prod.precio_oferta : prod.precio_unitario;
+      return sum + (prod.cantidad * precioFinal);
+    }, 0);
     
-    // Preparar detalle con subtotales
-    const detalle = productos.map(prod => ({
-      producto_id: prod.producto_id,
-      nombre: prod.nombre,
-      cantidad: prod.cantidad,
-      precio_unitario: prod.precio_unitario,
-      subtotal: prod.cantidad * prod.precio_unitario
-    }))
+    const costoDeliveryFinal = costo_delivery || 0;
+    const descuentoCuponFinal = cupon_aplicado?.descuento_aplicado || 0;
+    const totalCalculado = subtotalCalculado + costoDeliveryFinal - descuentoCuponFinal;
     
-    // Insertar pedido
+    logger.info(`💰 Cálculo de totales - Subtotal: ${subtotalCalculado}, Delivery: ${costoDeliveryFinal}, Descuento: ${descuentoCuponFinal}, Total: ${totalCalculado}`);
+    
+    // Preparar detalle con subtotales y precios de oferta
+    const detalle = productos.map(prod => {
+      const precioFinal = (prod.precio_oferta && prod.precio_oferta > 0) ? prod.precio_oferta : prod.precio_unitario;
+      return {
+        producto_id: prod.producto_id,
+        nombre: prod.nombre,
+        cantidad: prod.cantidad,
+        precio_unitario: prod.precio_unitario,
+        precio_oferta: prod.precio_oferta || null, // ✅ Guardar precio de oferta
+        precio_final: precioFinal, // ✅ Precio que realmente se cobra
+        subtotal: prod.cantidad * precioFinal
+      };
+    });
+    
+    // Insertar pedido con campos adicionales
     const insert = `
       INSERT INTO transaccion_comercial 
       (usuario_id, emprendimiento_id, total, estado, detalle, 
-       direccion_entrega, telefono_cliente, modo_entrega)
-      VALUES ($1, $2, $3, 'pendiente', $4::jsonb, $5, $6, $7)
+       direccion_entrega, telefono_cliente, modo_entrega, 
+       costo_delivery, cupon_codigo, descuento_cupon, subtotal)
+      VALUES ($1, $2, $3, 'pendiente', $4::jsonb, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `
     
     const { rows } = await pool.query(insert, [
-      userId, emprendimiento_id, total, JSON.stringify(detalle),
-      direccion_entrega || null, telefono_cliente || null, modo_entrega
+      userId, 
+      emprendimiento_id, 
+      totalCalculado, // Usar total calculado del backend
+      JSON.stringify(detalle),
+      direccion_entrega || null, 
+      telefono_cliente || null, 
+      modo_entrega,
+      costoDeliveryFinal, // ✅ Costo de delivery
+      cupon_aplicado?.codigo || null, // ✅ Código del cupón
+      descuentoCuponFinal, // ✅ Descuento aplicado
+      subtotalCalculado // ✅ Subtotal de productos
     ])
     
     logger.success(`Pedido creado: ID ${rows[0].id}`)
