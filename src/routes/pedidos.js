@@ -78,6 +78,81 @@ router.get('/', auth, async (req, res) => {
   }
 })
 
+// GET /api/pedidos/recibidos/contadores - Obtener solo los contadores por tab (emprendedor o vendedor)
+router.get('/recibidos/contadores', auth, async (req, res) => {
+  try {
+    const { id: userId, tipo_usuario } = req.auth
+    logger.info(`Obteniendo contadores para usuario ${userId}, tipo: ${tipo_usuario}`)
+    
+    let emprendimientoIds = []
+    
+    if (tipo_usuario === 'vendedor') {
+      const { rows: userRows } = await pool.query(
+        'SELECT emprendimiento_asignado_id FROM usuarios WHERE id = $1',
+        [userId]
+      )
+      
+      if (!userRows.length || !userRows[0].emprendimiento_asignado_id) {
+        return res.json({ ok: true, contadores: { pendientes: 0, cancelados: 0, historial: 0 } })
+      }
+      
+      emprendimientoIds = [userRows[0].emprendimiento_asignado_id]
+    } else {
+      const { rows: empRows } = await pool.query(
+        'SELECT id FROM emprendimientos WHERE usuario_id = $1',
+        [userId]
+      )
+      
+      if (!empRows.length) {
+        return res.json({ ok: true, contadores: { pendientes: 0, cancelados: 0, historial: 0 } })
+      }
+      
+      emprendimientoIds = empRows.map(emp => emp.id)
+    }
+    
+    // Contar pendientes
+    const { rows: pendientesRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial
+       WHERE emprendimiento_id = ANY($1)
+       AND estado IN ('pendiente', 'confirmado', 'preparando', 'listo')`,
+      [emprendimientoIds]
+    )
+    
+    // Contar cancelados
+    const { rows: canceladosRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial
+       WHERE emprendimiento_id = ANY($1)
+       AND estado = 'cancelado' 
+       AND motivo_rechazo IS NOT NULL 
+       AND cancelacion_confirmada = false`,
+      [emprendimientoIds]
+    )
+    
+    // Contar historial
+    const { rows: historialRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial
+       WHERE emprendimiento_id = ANY($1)
+       AND (estado = 'entregado' OR estado = 'rechazado' OR (estado = 'cancelado' AND cancelacion_confirmada = true))`,
+      [emprendimientoIds]
+    )
+    
+    const contadores = {
+      pendientes: parseInt(pendientesRows[0].total),
+      cancelados: parseInt(canceladosRows[0].total),
+      historial: parseInt(historialRows[0].total)
+    }
+    
+    logger.success(`Contadores obtenidos: ${JSON.stringify(contadores)}`)
+    res.json({ ok: true, contadores })
+  } catch (err) {
+    logger.error('Error obteniendo contadores:', err.message)
+    res.status(500).json({ ok: false, error: 'Error interno al obtener contadores' })
+  }
+})
+
 // GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor) con paginación
 router.get('/recibidos', auth, async (req, res) => {
   try {
