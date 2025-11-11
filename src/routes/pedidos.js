@@ -5,12 +5,38 @@ const auth = require('../middleware/auth')
 const logger = require('../utils/logger')
 const notificationService = require('../services/notificationService')
 
-// GET /api/pedidos - Obtener mis pedidos (cliente)
+// GET /api/pedidos - Obtener mis pedidos (cliente) con paginación
 router.get('/', auth, async (req, res) => {
   try {
     const { id: userId } = req.auth
-    logger.info(`Listando pedidos del cliente ${userId}`)
+    const { page = 1, limit = 10, tab = 'pendientes' } = req.query
     
+    const offset = (parseInt(page) - 1) * parseInt(limit)
+    
+    logger.info(`Listando pedidos del cliente ${userId}, tab: ${tab}, page: ${page}, limit: ${limit}`)
+    
+    // Determinar filtro y orden según el tab
+    let whereClause = 'tc.usuario_id = $1'
+    let orderBy = 'tc.created_at ASC' // Por defecto: más antiguo primero
+    
+    if (tab === 'pendientes') {
+      whereClause += ` AND tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo', 'en_camino')
+                       OR (tc.estado = 'entregado' AND tc.entrega_confirmada = false)`
+      orderBy = 'tc.created_at ASC' // Más antiguo primero
+    } else if (tab === 'rechazados') {
+      whereClause += ` AND tc.estado = 'rechazado' AND tc.rechazo_confirmado = false`
+      orderBy = 'tc.created_at ASC' // Más antiguo primero
+    } else if (tab === 'historial') {
+      whereClause += ` AND (
+        (tc.estado = 'entregado' AND tc.entrega_confirmada = true) OR
+        tc.estado = 'cerrado' OR
+        (tc.estado = 'rechazado' AND tc.rechazo_confirmado = true) OR
+        tc.estado = 'cancelado'
+      )`
+      orderBy = 'tc.created_at DESC' // Historial: más nuevo primero
+    }
+    
+    // Query con paginación
     const { rows } = await pool.query(
       `SELECT tc.*, 
               e.nombre as emprendimiento_nombre,
@@ -18,24 +44,49 @@ router.get('/', auth, async (req, res) => {
               e.telefono as emprendimiento_telefono
        FROM transaccion_comercial tc
        LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
-       WHERE tc.usuario_id = $1
-       ORDER BY tc.created_at DESC`,
+       WHERE ${whereClause}
+       ORDER BY ${orderBy}
+       LIMIT $2 OFFSET $3`,
+      [userId, parseInt(limit), offset]
+    )
+    
+    // Contar total de registros para el tab
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial tc
+       WHERE ${whereClause}`,
       [userId]
     )
     
-    logger.success(`Pedidos obtenidos: ${rows.length}`)
-    res.json({ ok: true, pedidos: rows })
+    const total = parseInt(countRows[0].total)
+    const hasMore = offset + rows.length < total
+    
+    logger.success(`Pedidos obtenidos: ${rows.length}/${total}, hasMore: ${hasMore}`)
+    res.json({ 
+      ok: true, 
+      pedidos: rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        hasMore
+      }
+    })
   } catch (err) {
     logger.error('Error listando pedidos:', err.message)
     res.status(500).json({ ok: false, error: 'Error interno al listar pedidos' })
   }
 })
 
-// GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor)
+// GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor) con paginación
 router.get('/recibidos', auth, async (req, res) => {
   try {
     const { id: userId, tipo_usuario } = req.auth
-    logger.info(`Listando pedidos recibidos para usuario ${userId}, tipo: ${tipo_usuario}`)
+    const { page = 1, limit = 10, tab = 'pendientes' } = req.query
+    
+    const offset = (parseInt(page) - 1) * parseInt(limit)
+    
+    logger.info(`Listando pedidos recibidos para usuario ${userId}, tipo: ${tipo_usuario}, tab: ${tab}, page: ${page}`)
     
     let emprendimientoIds = []
     let empDict = {}
@@ -48,7 +99,7 @@ router.get('/recibidos', auth, async (req, res) => {
       )
       
       if (!userRows.length || !userRows[0].emprendimiento_asignado_id) {
-        return res.json({ ok: true, pedidos: [] })
+        return res.json({ ok: true, pedidos: [], pagination: { page: 1, limit, total: 0, hasMore: false } })
       }
       
       const { rows: empRows } = await pool.query(
@@ -57,7 +108,7 @@ router.get('/recibidos', auth, async (req, res) => {
       )
       
       if (!empRows.length) {
-        return res.json({ ok: true, pedidos: [] })
+        return res.json({ ok: true, pedidos: [], pagination: { page: 1, limit, total: 0, hasMore: false } })
       }
       
       emprendimientoIds = [empRows[0].id]
@@ -70,13 +121,32 @@ router.get('/recibidos', auth, async (req, res) => {
       )
       
       if (!empRows.length) {
-        return res.json({ ok: true, pedidos: [] })
+        return res.json({ ok: true, pedidos: [], pagination: { page: 1, limit, total: 0, hasMore: false } })
       }
       
       emprendimientoIds = empRows.map(emp => emp.id)
       empRows.forEach(emp => {
         empDict[emp.id] = { nombre: emp.emprendimiento_nombre, logo: emp.emprendimiento_logo }
       })
+    }
+    
+    // Determinar filtro y orden según el tab
+    let whereClause = 'tc.emprendimiento_id = ANY($1)'
+    let orderBy = 'tc.created_at ASC' // Por defecto: más antiguo primero
+    
+    if (tab === 'pendientes') {
+      whereClause += ` AND tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo')`
+      orderBy = 'tc.created_at ASC' // Más antiguo primero
+    } else if (tab === 'cancelados') {
+      whereClause += ` AND tc.estado = 'cancelado' AND tc.motivo_rechazo IS NOT NULL AND tc.cancelacion_confirmada = false`
+      orderBy = 'tc.created_at ASC' // Más antiguo primero
+    } else if (tab === 'historial') {
+      whereClause += ` AND (
+        tc.estado = 'entregado' OR
+        tc.estado = 'rechazado' OR
+        (tc.estado = 'cancelado' AND tc.cancelacion_confirmada = true)
+      )`
+      orderBy = 'tc.created_at DESC' // Historial: más nuevo primero
     }
     
     const { rows } = await pool.query(
@@ -90,10 +160,22 @@ router.get('/recibidos', auth, async (req, res) => {
        FROM transaccion_comercial tc
        LEFT JOIN usuarios u ON tc.usuario_id = u.id
        LEFT JOIN pedidos_historial_cliente phc ON phc.cliente_id = tc.usuario_id AND phc.emprendimiento_id = tc.emprendimiento_id
-       WHERE tc.emprendimiento_id = ANY($1)
-       ORDER BY tc.created_at ASC`,
+       WHERE ${whereClause}
+       ORDER BY ${orderBy}
+       LIMIT $2 OFFSET $3`,
+      [emprendimientoIds, parseInt(limit), offset]
+    )
+    
+    // Contar total de registros para el tab
+    const { rows: countRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial tc
+       WHERE ${whereClause}`,
       [emprendimientoIds]
     )
+    
+    const total = parseInt(countRows[0].total)
+    const hasMore = offset + rows.length < total
     
     // Mapear datos adicionales
     const pedidosMapeados = rows.map(pedido => ({
@@ -102,8 +184,17 @@ router.get('/recibidos', auth, async (req, res) => {
       emprendimiento_logo: empDict[pedido.emprendimiento_id]?.logo || null
     }))
     
-    logger.success(`Pedidos recibidos obtenidos: ${rows.length}`)
-    res.json({ ok: true, pedidos: pedidosMapeados })
+    logger.success(`Pedidos recibidos obtenidos: ${rows.length}/${total}, hasMore: ${hasMore}`)
+    res.json({ 
+      ok: true, 
+      pedidos: pedidosMapeados,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        hasMore
+      }
+    })
   } catch (err) {
     logger.error('Error listando pedidos recibidos:', err.message)
     res.status(500).json({ ok: false, error: 'Error interno al listar pedidos' })
