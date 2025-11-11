@@ -19,7 +19,6 @@ router.get('/', auth, async (req, res) => {
        FROM transaccion_comercial tc
        LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
        WHERE tc.usuario_id = $1
-       AND NOT (tc.estado = 'rechazado' AND tc.rechazo_confirmado = false)
        ORDER BY tc.created_at DESC`,
       [userId]
     )
@@ -607,12 +606,27 @@ router.patch('/:id/estado', auth, async (req, res) => {
           { nombre: emprendimientoNombre }
         ).catch(err => logger.error('Error enviando notificación push:', err.message))
       } else if (estado === 'rechazado') {
+        // ✅ EMPRENDEDOR rechazó → notificar al CLIENTE
         notificationService.notificarPedidoRechazado(
           pedido.usuario_id,
           pedido,
           { nombre: emprendimientoNombre },
           motivo_rechazo || 'No especificado'
         ).catch(err => logger.error('Error enviando notificación push:', err.message))
+      } else if (estado === 'cancelado') {
+        // ✅ CLIENTE canceló → notificar al EMPRENDEDOR
+        const { rows: empRows } = await pool.query(
+          'SELECT usuario_id FROM emprendimientos WHERE id = $1',
+          [pedido.emprendimiento_id]
+        )
+        if (empRows.length > 0) {
+          notificationService.notificarPedidoCancelado(
+            empRows[0].usuario_id, // ID del emprendedor
+            pedido,
+            { nombre: emprendimientoNombre },
+            motivo_rechazo || 'No especificado'
+          ).catch(err => logger.error('Error enviando notificación push al emprendedor:', err.message))
+        }
       }
       
       // También emitir al emprendedor y vendedor (si lo cambia un emprendedor o vendedor)

@@ -248,6 +248,28 @@ const notificarPedidoEntregado = async (clienteId, pedido, emprendimiento) => {
 }
 
 /**
+ * Enviar notificación por pedido cancelado al emprendedor
+ */
+const notificarPedidoCancelado = async (emprendedorId, pedido, emprendimiento, motivo) => {
+  const notificacion = {
+    titulo: '❌ Pedido Cancelado por Cliente',
+    mensaje: `Un cliente ha cancelado un pedido en ${emprendimiento.nombre}${motivo ? ': ' + motivo : ''}`,
+    tipo: 'pedido_cancelado',
+    data: {
+      tipo: 'pedido_cancelado',
+      pedido_id: pedido.id.toString(),
+      emprendimiento_id: pedido.emprendimiento_id?.toString(),
+      emprendimiento_nombre: emprendimiento.nombre,
+      motivo: motivo || '',
+      screen: 'PedidosRecibidos',
+      tab: 'cancelados'
+    }
+  }
+
+  return await enviarNotificacionAUsuario(emprendedorId, notificacion)
+}
+
+/**
  * Enviar notificación de oferta especial
  */
 const notificarOfertaEspecial = async (usuariosIds, titulo, mensaje, data = {}) => {
@@ -310,6 +332,7 @@ module.exports = {
   notificarNuevoPedido,
   notificarPedidoConfirmado,
   notificarPedidoRechazado,
+  notificarPedidoCancelado,
   notificarPedidoEnCamino,
   notificarPedidoEntregado,
   notificarOfertaEspecial,
