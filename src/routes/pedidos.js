@@ -212,11 +212,14 @@ router.get('/recibidos', auth, async (req, res) => {
     let queryParams = [emprendimientoIds]
     let paramIndex = 2
     
-    // Si hay búsqueda, buscar por número de pedido (ID)
+    // Si hay búsqueda, buscar por número de pedido (ID con padding de 6 dígitos)
     if (searchTerm) {
-      // El usuario ingresa "123" y buscamos pedidos cuyo ID contenga "123"
-      // Formato: #P-000123, así que buscamos en el ID convertido a texto
-      whereClause += ` AND CAST(tc.id AS TEXT) LIKE $${paramIndex}`
+      // Formatear el ID a 6 dígitos: LPAD(id, 6, '0')
+      // Ejemplos:
+      // - Busca "1" → encuentra: 000001, 000010, 000011, 000012, 000100, etc.
+      // - Busca "000001" → encuentra solo: 000001
+      // - Busca "00001" → encuentra: 000001, 100001, 200001, etc.
+      whereClause += ` AND LPAD(CAST(tc.id AS TEXT), 6, '0') LIKE $${paramIndex}`
       queryParams.push(`%${searchTerm}%`)
       paramIndex++
       orderBy = 'tc.created_at DESC' // En búsqueda, más reciente primero
