@@ -9,59 +9,88 @@ const notificationService = require('../services/notificationService')
 router.get('/', auth, async (req, res) => {
   try {
     const { id: userId } = req.auth
-    const { page = 1, limit = 10, tab = 'pendientes' } = req.query
+    const { page = 1, limit = 10, tab = 'pendientes', search = '' } = req.query
     
     const offset = (parseInt(page) - 1) * parseInt(limit)
+    const searchTerm = search.trim()
     
-    logger.info(`Listando pedidos del cliente ${userId}, tab: ${tab}, page: ${page}, limit: ${limit}`)
+    logger.info(`Listando pedidos del cliente ${userId}, tab: ${tab}, page: ${page}, limit: ${limit}, search: "${searchTerm}"`)
     
     // Determinar filtro y orden según el tab
     let whereClause = 'tc.usuario_id = $1'
     let orderBy = 'tc.created_at ASC' // Por defecto: más antiguo primero
+    let queryParams = [userId]
+    let paramIndex = 2
     
-    if (tab === 'pendientes') {
-      whereClause += ` AND tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo', 'en_camino')
-                       OR (tc.estado = 'entregado' AND tc.entrega_confirmada = false)`
-      orderBy = 'tc.created_at ASC' // Más antiguo primero
-    } else if (tab === 'rechazados') {
-      whereClause += ` AND tc.estado = 'rechazado' AND tc.rechazo_confirmado = false`
-      orderBy = 'tc.created_at ASC' // Más antiguo primero
-    } else if (tab === 'historial') {
-      whereClause += ` AND (
-        (tc.estado = 'entregado' AND tc.entrega_confirmada = true) OR
-        tc.estado = 'cerrado' OR
-        (tc.estado = 'rechazado' AND tc.rechazo_confirmado = true) OR
-        tc.estado = 'cancelado'
-      )`
-      orderBy = 'tc.created_at DESC' // Historial: más nuevo primero
+    // Si hay búsqueda, buscar en TODOS los pedidos (ignorar tab)
+    if (searchTerm) {
+      // Formatear el ID a 6 dígitos: LPAD(id, 6, '0')
+      // Buscar en todos los estados, el frontend filtrará por tab
+      whereClause += ` AND LPAD(CAST(tc.id AS TEXT), 6, '0') LIKE $${paramIndex}`
+      queryParams.push(`%${searchTerm}%`)
+      paramIndex++
+      orderBy = 'tc.created_at DESC' // En búsqueda, más reciente primero
+      logger.info(`Búsqueda global por número de pedido: "${searchTerm}" (sin filtro de tab)`)
+    } else {
+      // Sin búsqueda: aplicar filtro de tab normal
+      if (tab === 'pendientes') {
+        whereClause += ` AND (tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo', 'en_camino')
+                         OR (tc.estado = 'entregado' AND tc.entrega_confirmada = false))`
+        orderBy = 'tc.created_at ASC' // Más antiguo primero
+      } else if (tab === 'rechazados') {
+        whereClause += ` AND tc.estado = 'rechazado' AND tc.rechazo_confirmado = false`
+        orderBy = 'tc.created_at ASC' // Más antiguo primero
+      } else if (tab === 'historial') {
+        whereClause += ` AND (
+          (tc.estado = 'entregado' AND tc.entrega_confirmada = true) OR
+          tc.estado = 'cerrado' OR
+          (tc.estado = 'rechazado' AND tc.rechazo_confirmado = true) OR
+          tc.estado = 'cancelado'
+        )`
+        orderBy = 'tc.created_at DESC' // Historial: más nuevo primero
+      }
     }
     
-    // Query con paginación
-    const { rows } = await pool.query(
-      `SELECT tc.*, 
-              e.nombre as emprendimiento_nombre,
-              e.logo_url as emprendimiento_logo,
-              e.telefono as emprendimiento_telefono
-       FROM transaccion_comercial tc
-       LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
-       WHERE ${whereClause}
-       ORDER BY ${orderBy}
-       LIMIT $2 OFFSET $3`,
-      [userId, parseInt(limit), offset]
-    )
+    // Si hay búsqueda, NO paginar (devolver TODOS los resultados)
+    let querySQL = `
+      SELECT tc.*, 
+             e.nombre as emprendimiento_nombre,
+             e.logo_url as emprendimiento_logo,
+             e.telefono as emprendimiento_telefono
+      FROM transaccion_comercial tc
+      LEFT JOIN emprendimientos e ON tc.emprendimiento_id = e.id
+      WHERE ${whereClause}
+      ORDER BY ${orderBy}
+    `
     
-    // Contar total de registros para el tab
+    // Solo agregar LIMIT y OFFSET si NO hay búsqueda
+    if (!searchTerm) {
+      const limitParam = `$${paramIndex}`
+      const offsetParam = `$${paramIndex + 1}`
+      queryParams.push(parseInt(limit), offset)
+      querySQL += ` LIMIT ${limitParam} OFFSET ${offsetParam}`
+    }
+    
+    const { rows } = await pool.query(querySQL, queryParams)
+    
+    // Contar total de registros para el tab o búsqueda
+    const countParams = searchTerm ? queryParams : queryParams.slice(0, -2)
+    
     const { rows: countRows } = await pool.query(
       `SELECT COUNT(*) as total
        FROM transaccion_comercial tc
        WHERE ${whereClause}`,
-      [userId]
+      countParams
     )
     
     const total = parseInt(countRows[0].total)
-    const hasMore = offset + rows.length < total
+    const hasMore = searchTerm ? false : offset + rows.length < total
     
-    logger.success(`Pedidos obtenidos: ${rows.length}/${total}, hasMore: ${hasMore}`)
+    if (searchTerm) {
+      logger.success(`Búsqueda completada: ${rows.length} resultados encontrados para "${searchTerm}"`)
+    } else {
+      logger.success(`Pedidos obtenidos: ${rows.length}/${total}, hasMore: ${hasMore}`)
+    }
     res.json({ 
       ok: true, 
       pedidos: rows,
