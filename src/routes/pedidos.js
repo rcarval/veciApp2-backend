@@ -182,6 +182,58 @@ router.get('/recibidos/contadores', auth, async (req, res) => {
   }
 })
 
+// GET /api/pedidos/contadores - Obtener solo los contadores por tab (cliente)
+router.get('/contadores', auth, async (req, res) => {
+  try {
+    const { id: userId } = req.auth
+    logger.info(`Obteniendo contadores para cliente ${userId}`)
+    
+    // Contar pendientes
+    const { rows: pendientesRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial tc
+       WHERE tc.usuario_id = $1
+       AND (tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo', 'en_camino')
+            OR (tc.estado = 'entregado' AND tc.entrega_confirmada = false))`,
+      [userId]
+    )
+    
+    // Contar rechazados
+    const { rows: rechazadosRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial tc
+       WHERE tc.usuario_id = $1
+       AND tc.estado = 'rechazado' 
+       AND tc.rechazo_confirmado = false`,
+      [userId]
+    )
+    
+    // Contar historial
+    const { rows: historialRows } = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM transaccion_comercial tc
+       WHERE tc.usuario_id = $1
+       AND ((tc.estado = 'entregado' AND tc.entrega_confirmada = true) 
+            OR tc.estado = 'cerrado' 
+            OR (tc.estado = 'rechazado' AND tc.rechazo_confirmado = true) 
+            OR tc.estado = 'cancelado')`,
+      [userId]
+    )
+    
+    const contadores = {
+      pendientes: parseInt(pendientesRows[0].total),
+      rechazados: parseInt(rechazadosRows[0].total),
+      historial: parseInt(historialRows[0].total)
+    }
+    
+    logger.success(`Contadores obtenidos - Pendientes: ${contadores.pendientes}, Rechazados: ${contadores.rechazados}, Historial: ${contadores.historial}`)
+    res.json({ ok: true, contadores })
+  } catch (err) {
+    logger.error('Error obteniendo contadores de cliente:', err.message)
+    res.status(500).json({ ok: false, error: 'Error interno al obtener contadores' })
+  }
+})
+
 // GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor) con paginación y búsqueda
 router.get('/recibidos', auth, async (req, res) => {
   try {
