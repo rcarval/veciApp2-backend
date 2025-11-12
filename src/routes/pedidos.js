@@ -212,20 +212,17 @@ router.get('/recibidos', auth, async (req, res) => {
     let queryParams = [emprendimientoIds]
     let paramIndex = 2
     
-    // Si hay búsqueda, buscar por número de pedido (ID con padding de 6 dígitos)
+    // Si hay búsqueda, buscar en TODOS los pedidos (ignorar tab)
     if (searchTerm) {
       // Formatear el ID a 6 dígitos: LPAD(id, 6, '0')
-      // Ejemplos:
-      // - Busca "1" → encuentra: 000001, 000010, 000011, 000012, 000100, etc.
-      // - Busca "000001" → encuentra solo: 000001
-      // - Busca "00001" → encuentra: 000001, 100001, 200001, etc.
+      // Buscar en todos los estados, el frontend filtrará por tab
       whereClause += ` AND LPAD(CAST(tc.id AS TEXT), 6, '0') LIKE $${paramIndex}`
       queryParams.push(`%${searchTerm}%`)
       paramIndex++
       orderBy = 'tc.created_at DESC' // En búsqueda, más reciente primero
-      logger.info(`Búsqueda por número de pedido: "${searchTerm}"`)
+      logger.info(`Búsqueda global por número de pedido: "${searchTerm}" (sin filtro de tab)`)
     } else {
-      // Sin búsqueda, filtrar por tab
+      // Sin búsqueda: aplicar filtro de tab normal
       if (tab === 'pendientes') {
         whereClause += ` AND tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo')`
         orderBy = 'tc.created_at ASC' // Más antiguo primero
@@ -242,27 +239,32 @@ router.get('/recibidos', auth, async (req, res) => {
       }
     }
     
-    // Agregar LIMIT y OFFSET a los parámetros
-    const limitParam = `$${paramIndex}`
-    const offsetParam = `$${paramIndex + 1}`
-    queryParams.push(parseInt(limit), offset)
+    // Si hay búsqueda, NO paginar (devolver TODOS los resultados)
+    // Para que el frontend pueda calcular contadores en todos los tabs
+    let querySQL = `
+      SELECT tc.*, 
+             u.nombre as cliente_nombre,
+             u.telefono as cliente_telefono,
+             u.avatar_url as cliente_avatar,
+             phc.total_pedidos,
+             phc.primera_compra,
+             phc.ultima_compra
+      FROM transaccion_comercial tc
+      LEFT JOIN usuarios u ON tc.usuario_id = u.id
+      LEFT JOIN pedidos_historial_cliente phc ON phc.cliente_id = tc.usuario_id AND phc.emprendimiento_id = tc.emprendimiento_id
+      WHERE ${whereClause}
+      ORDER BY ${orderBy}
+    `
     
-    const { rows } = await pool.query(
-      `SELECT tc.*, 
-              u.nombre as cliente_nombre,
-              u.telefono as cliente_telefono,
-              u.avatar_url as cliente_avatar,
-              phc.total_pedidos,
-              phc.primera_compra,
-              phc.ultima_compra
-       FROM transaccion_comercial tc
-       LEFT JOIN usuarios u ON tc.usuario_id = u.id
-       LEFT JOIN pedidos_historial_cliente phc ON phc.cliente_id = tc.usuario_id AND phc.emprendimiento_id = tc.emprendimiento_id
-       WHERE ${whereClause}
-       ORDER BY ${orderBy}
-       LIMIT ${limitParam} OFFSET ${offsetParam}`,
-      queryParams
-    )
+    // Solo agregar LIMIT y OFFSET si NO hay búsqueda
+    if (!searchTerm) {
+      const limitParam = `$${paramIndex}`
+      const offsetParam = `$${paramIndex + 1}`
+      queryParams.push(parseInt(limit), offset)
+      querySQL += ` LIMIT ${limitParam} OFFSET ${offsetParam}`
+    }
+    
+    const { rows } = await pool.query(querySQL, queryParams)
     
     // Contar total de registros para el tab o búsqueda
     const { rows: countRows } = await pool.query(
