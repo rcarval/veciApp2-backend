@@ -153,15 +153,16 @@ router.get('/recibidos/contadores', auth, async (req, res) => {
   }
 })
 
-// GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor) con paginación
+// GET /api/pedidos/recibidos - Obtener pedidos recibidos (emprendedor o vendedor) con paginación y búsqueda
 router.get('/recibidos', auth, async (req, res) => {
   try {
     const { id: userId, tipo_usuario } = req.auth
-    const { page = 1, limit = 10, tab = 'pendientes' } = req.query
+    const { page = 1, limit = 10, tab = 'pendientes', search = '' } = req.query
     
     const offset = (parseInt(page) - 1) * parseInt(limit)
+    const searchTerm = search.trim()
     
-    logger.info(`Listando pedidos recibidos para usuario ${userId}, tipo: ${tipo_usuario}, tab: ${tab}, page: ${page}`)
+    logger.info(`Listando pedidos recibidos para usuario ${userId}, tipo: ${tipo_usuario}, tab: ${tab}, page: ${page}, search: "${searchTerm}"`)
     
     let emprendimientoIds = []
     let empDict = {}
@@ -208,21 +209,40 @@ router.get('/recibidos', auth, async (req, res) => {
     // Determinar filtro y orden según el tab
     let whereClause = 'tc.emprendimiento_id = ANY($1)'
     let orderBy = 'tc.created_at ASC' // Por defecto: más antiguo primero
+    let queryParams = [emprendimientoIds]
+    let paramIndex = 2
     
-    if (tab === 'pendientes') {
-      whereClause += ` AND tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo')`
-      orderBy = 'tc.created_at ASC' // Más antiguo primero
-    } else if (tab === 'cancelados') {
-      whereClause += ` AND tc.estado = 'cancelado' AND tc.motivo_rechazo IS NOT NULL AND tc.cancelacion_confirmada = false`
-      orderBy = 'tc.created_at ASC' // Más antiguo primero
-    } else if (tab === 'historial') {
-      whereClause += ` AND (
-        tc.estado = 'entregado' OR
-        tc.estado = 'rechazado' OR
-        (tc.estado = 'cancelado' AND tc.cancelacion_confirmada = true)
-      )`
-      orderBy = 'tc.created_at DESC' // Historial: más nuevo primero
+    // Si hay búsqueda, buscar por número de pedido (ID)
+    if (searchTerm) {
+      // El usuario ingresa "123" y buscamos pedidos cuyo ID contenga "123"
+      // Formato: #P-000123, así que buscamos en el ID convertido a texto
+      whereClause += ` AND CAST(tc.id AS TEXT) LIKE $${paramIndex}`
+      queryParams.push(`%${searchTerm}%`)
+      paramIndex++
+      orderBy = 'tc.created_at DESC' // En búsqueda, más reciente primero
+      logger.info(`Búsqueda por número de pedido: "${searchTerm}"`)
+    } else {
+      // Sin búsqueda, filtrar por tab
+      if (tab === 'pendientes') {
+        whereClause += ` AND tc.estado IN ('pendiente', 'confirmado', 'preparando', 'listo')`
+        orderBy = 'tc.created_at ASC' // Más antiguo primero
+      } else if (tab === 'cancelados') {
+        whereClause += ` AND tc.estado = 'cancelado' AND tc.motivo_rechazo IS NOT NULL AND tc.cancelacion_confirmada = false`
+        orderBy = 'tc.created_at ASC' // Más antiguo primero
+      } else if (tab === 'historial') {
+        whereClause += ` AND (
+          tc.estado = 'entregado' OR
+          tc.estado = 'rechazado' OR
+          (tc.estado = 'cancelado' AND tc.cancelacion_confirmada = true)
+        )`
+        orderBy = 'tc.created_at DESC' // Historial: más nuevo primero
+      }
     }
+    
+    // Agregar LIMIT y OFFSET a los parámetros
+    const limitParam = `$${paramIndex}`
+    const offsetParam = `$${paramIndex + 1}`
+    queryParams.push(parseInt(limit), offset)
     
     const { rows } = await pool.query(
       `SELECT tc.*, 
@@ -237,16 +257,16 @@ router.get('/recibidos', auth, async (req, res) => {
        LEFT JOIN pedidos_historial_cliente phc ON phc.cliente_id = tc.usuario_id AND phc.emprendimiento_id = tc.emprendimiento_id
        WHERE ${whereClause}
        ORDER BY ${orderBy}
-       LIMIT $2 OFFSET $3`,
-      [emprendimientoIds, parseInt(limit), offset]
+       LIMIT ${limitParam} OFFSET ${offsetParam}`,
+      queryParams
     )
     
-    // Contar total de registros para el tab
+    // Contar total de registros para el tab o búsqueda
     const { rows: countRows } = await pool.query(
       `SELECT COUNT(*) as total
        FROM transaccion_comercial tc
        WHERE ${whereClause}`,
-      [emprendimientoIds]
+      queryParams.slice(0, -2) // Sin LIMIT y OFFSET
     )
     
     const total = parseInt(countRows[0].total)
@@ -259,7 +279,12 @@ router.get('/recibidos', auth, async (req, res) => {
       emprendimiento_logo: empDict[pedido.emprendimiento_id]?.logo || null
     }))
     
-    logger.success(`Pedidos recibidos obtenidos: ${rows.length}/${total}, hasMore: ${hasMore}`)
+    if (searchTerm) {
+      logger.success(`Búsqueda completada: ${rows.length} resultados encontrados para "${searchTerm}"`)
+    } else {
+      logger.success(`Pedidos recibidos obtenidos: ${rows.length}/${total}, hasMore: ${hasMore}`)
+    }
+    
     res.json({ 
       ok: true, 
       pedidos: pedidosMapeados,
