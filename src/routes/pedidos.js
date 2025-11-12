@@ -267,15 +267,19 @@ router.get('/recibidos', auth, async (req, res) => {
     const { rows } = await pool.query(querySQL, queryParams)
     
     // Contar total de registros para el tab o búsqueda
+    // Si hay búsqueda, queryParams NO tiene LIMIT/OFFSET, usar todos los parámetros
+    // Si no hay búsqueda, queryParams tiene LIMIT/OFFSET al final, excluir los últimos 2
+    const countParams = searchTerm ? queryParams : queryParams.slice(0, -2)
+    
     const { rows: countRows } = await pool.query(
       `SELECT COUNT(*) as total
        FROM transaccion_comercial tc
        WHERE ${whereClause}`,
-      queryParams.slice(0, -2) // Sin LIMIT y OFFSET
+      countParams
     )
     
     const total = parseInt(countRows[0].total)
-    const hasMore = offset + rows.length < total
+    const hasMore = searchTerm ? false : offset + rows.length < total
     
     // Mapear datos adicionales
     const pedidosMapeados = rows.map(pedido => ({
